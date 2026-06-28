@@ -112,6 +112,7 @@ def test_chat_can_use_codex_answer_mode(service: PaperService, tmp_path: Path, m
     assert command[:2] == ["/usr/local/bin/codex", "exec"]
     assert "--sandbox" in command
     assert "read-only" in command
+    assert "--skip-git-repo-check" in command
 
 
 def test_codex_answer_mode_requires_explicit_enablement(service: PaperService) -> None:

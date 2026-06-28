@@ -1,0 +1,10 @@
+services:
+  api:
+    environment:
+      OPEN_ALPHAXIV_CODEX_ENABLED: "true"
+      OPEN_ALPHAXIV_CODEX_CLI_PATH: /opt/codex-node/bin/codex
+      CODEX_HOME: /codex-home
+      PATH: /opt/codex-node/bin:/usr/local/bin:/usr/bin:/bin
+    volumes:
+      - ${OPEN_ALPHAXIV_HOST_NODE_PREFIX:?Set OPEN_ALPHAXIV_HOST_NODE_PREFIX to the host Node prefix that contains bin/codex}:/opt/codex-node:ro
+      - ${OPEN_ALPHAXIV_HOST_CODEX_HOME:?Set OPEN_ALPHAXIV_HOST_CODEX_HOME to the host Codex credential directory}:/codex-home

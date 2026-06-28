@@ -71,6 +71,26 @@ For Docker, the API container must also have the Codex CLI and credentials
 available. The compose file passes the relevant environment variables, but it
 does not install Codex into the image by default.
 
+To mount a host Codex CLI install and host Codex credentials into the API
+container, run:
+
+```bash
+bash scripts/check-codex-docker.sh
+```
+
+The script prints the exact `OPEN_ALPHAXIV_HOST_NODE_PREFIX`,
+`OPEN_ALPHAXIV_HOST_CODEX_HOME`, and compose command for your machine. The
+resulting command uses `docker-compose.codex.yml`, which mounts:
+
+- the host Node prefix containing `bin/codex` at `/opt/codex-node`
+- the host Codex credential directory at `/codex-home`
+- `CODEX_HOME=/codex-home`
+- `OPEN_ALPHAXIV_CODEX_ENABLED=true`
+
+If the host Codex install uses file-based auth, `auth.json` is mounted into the
+container. Treat that file as a password. The web UI only displays setup status
+and commands; it does not start `codex login`.
+
 Relevant settings:
 
 - `OPEN_ALPHAXIV_CODEX_ENABLED=true`
@@ -80,6 +100,8 @@ Relevant settings:
 - `OPEN_ALPHAXIV_CODEX_SANDBOX=read-only`
 - `CODEX_HOME`, `CODEX_ACCESS_TOKEN`, `CODEX_API_KEY`, or
   `CODEX_AUTH_JSON_PATH` when needed by the backend runtime
+- `OPEN_ALPHAXIV_HOST_NODE_PREFIX` and `OPEN_ALPHAXIV_HOST_CODEX_HOME` when
+  using `docker-compose.codex.yml`
 
 ## Planning Documents
 

@@ -683,8 +683,7 @@ def codex_answer(
         "--ephemeral",
         "--sandbox",
         sandbox,
-        "--ask-for-approval",
-        "never",
+        "--skip-git-repo-check",
     ]
     if model:
         command.extend(["--model", model])

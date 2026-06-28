@@ -494,6 +494,13 @@ function App() {
                 </div>
                 <p className="codex-path">{codexStatus?.codex_cli_path}</p>
                 <p className="codex-boundary">{codexStatus?.integration_boundary}</p>
+                {!codexStatus?.codex_chat_available ? (
+                  <div className="setup-code">
+                    <strong>Docker setup</strong>
+                    <code>bash scripts/check-codex-docker.sh</code>
+                    <code>docker compose -f docker-compose.yml -f docker-compose.codex.yml up -d --build api web worker</code>
+                  </div>
+                ) : null}
                 <div className="auth-modes">
                   {codexStatus?.auth_modes.map((mode) => <span key={mode}>{mode}</span>)}
                 </div>

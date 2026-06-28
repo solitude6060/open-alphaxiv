@@ -793,6 +793,31 @@ blockquote p {
   overflow-wrap: anywhere;
 }
 
+.setup-code {
+  border: 1px solid #dbe3e6;
+  border-radius: 8px;
+  padding: 12px;
+  display: grid;
+  gap: 8px;
+  background: #f8fbfc;
+}
+
+.setup-code strong {
+  color: #263a41;
+  font-size: 13px;
+}
+
+.setup-code code {
+  border-radius: 5px;
+  padding: 8px;
+  background: #102026;
+  color: #dff8f3;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
 .auth-modes {
   flex-wrap: wrap;
   gap: 8px;
