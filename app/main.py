@@ -57,11 +57,28 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Open AlphaXiv Local", version="0.1.0-mvp1")
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[settings.cors_origin, "http://localhost:3000", "http://127.0.0.1:3000"],
+        allow_origins=[
+            settings.cors_origin,
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:3100",
+            "http://127.0.0.1:3100",
+        ],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.get("/")
+    def root() -> dict[str, Any]:
+        return {
+            "name": "Open AlphaXiv Local",
+            "status": "ok",
+            "version": "0.1.0-mvp1",
+            "web_url": settings.cors_origin,
+            "api_health_url": "/api/health",
+            "api_docs_url": "/docs",
+        }
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:
@@ -145,4 +162,3 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
-
