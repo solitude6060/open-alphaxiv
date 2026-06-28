@@ -4,8 +4,11 @@ import {
   ArrowRight,
   BookOpen,
   Bookmark,
+  CheckCircle2,
+  Clipboard,
   Database,
   Download,
+  ExternalLink,
   FileSearch,
   GitBranch,
   HeartPulse,
@@ -13,9 +16,11 @@ import {
   MessageSquare,
   Network,
   Plus,
+  Quote,
   Search,
   Settings,
   ShieldCheck,
+  Sparkles,
   Tags
 } from "lucide-react";
 import "./styles.css";
@@ -66,6 +71,23 @@ type ChatResult = {
   citations: Array<{ chunk_id: number; section_path: string; score: number; text: string }>;
 };
 
+type Chunk = {
+  id: number;
+  section_path: string;
+  chunk_index: number;
+  text: string;
+  token_count: number;
+};
+
+type CodexStatus = {
+  status: "ready" | "not_configured";
+  codex_cli_available: boolean;
+  codex_access_token_present: boolean;
+  codex_auth_json_configured: boolean;
+  auth_modes: string[];
+  integration_boundary: string;
+};
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, {
     ...options,
@@ -90,10 +112,14 @@ function App() {
   const [papers, setPapers] = useState<Paper[]>([]);
   const [selectedPaperId, setSelectedPaperId] = useState<number | null>(null);
   const [source, setSource] = useState("https://arxiv.org/abs/2201.08239");
-  const [query, setQuery] = useState("What is the paper about?");
+  const [query, setQuery] = useState("What is the core contribution?");
+  const [selectedText, setSelectedText] = useState("");
+  const [chunks, setChunks] = useState<Chunk[]>([]);
   const [chatResult, setChatResult] = useState<ChatResult | null>(null);
   const [graphView, setGraphView] = useState("related");
   const [graph, setGraph] = useState<{ nodes: GraphNode[]; edges: GraphEdge[] } | null>(null);
+  const [activeTool, setActiveTool] = useState<"assistant" | "notes" | "similar" | "codex">("assistant");
+  const [codexStatus, setCodexStatus] = useState<CodexStatus | null>(null);
   const [status, setStatus] = useState("Loading local workspace");
   const [error, setError] = useState("");
 
@@ -103,12 +129,14 @@ function App() {
   );
 
   async function refresh() {
-    const [providerRows, paperRows] = await Promise.all([
+    const [providerRows, paperRows, codex] = await Promise.all([
       request<Provider[]>("/api/providers"),
-      request<Paper[]>("/api/papers")
+      request<Paper[]>("/api/papers"),
+      request<CodexStatus>("/api/codex/status")
     ]);
     setProviders(providerRows);
     setPapers(paperRows);
+    setCodexStatus(codex);
     if (!selectedPaperId && paperRows.length > 0) {
       setSelectedPaperId(paperRows[0].id);
     }
@@ -124,7 +152,7 @@ function App() {
 
   useEffect(() => {
     if (selectedPaper) {
-      loadGraph(selectedPaper.id, graphView).catch((err) => setError(String(err.message || err)));
+      loadPaperData(selectedPaper.id, graphView).catch((err) => setError(String(err.message || err)));
     }
   }, [selectedPaper?.id, graphView]);
 
@@ -155,6 +183,7 @@ function App() {
     });
     setSelectedPaperId(paper.id);
     await refresh();
+    await loadPaperData(paper.id, graphView);
     setStatus(`Paper ready: ${paper.title}`);
   }
 
@@ -164,17 +193,21 @@ function App() {
     setStatus("Retrieving cited context");
     const result = await request<ChatResult>("/api/chat/messages", {
       method: "POST",
-      body: JSON.stringify({ paper_id: selectedPaper.id, query })
+      body: JSON.stringify({ paper_id: selectedPaper.id, query, selected_text: selectedText })
     });
     setChatResult(result);
     setStatus("Answer generated");
   }
 
-  async function loadGraph(paperId: number, view: string) {
-    const data = await request<{ nodes: GraphNode[]; edges: GraphEdge[] }>(
-      `/api/papers/${paperId}/literature-graph?view=${view}`
-    );
-    setGraph(data);
+  async function loadPaperData(paperId: number, view: string) {
+    const [chunkRows, graphData] = await Promise.all([
+      request<Chunk[]>(`/api/papers/${paperId}/chunks`),
+      request<{ nodes: GraphNode[]; edges: GraphEdge[] }>(
+        `/api/papers/${paperId}/literature-graph?view=${view}`
+      )
+    ]);
+    setChunks(chunkRows);
+    setGraph(graphData);
   }
 
   async function toggleBookmark() {
@@ -195,131 +228,253 @@ function App() {
     await refresh();
   }
 
+  function captureSelection(event: React.MouseEvent<HTMLElement>) {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) return;
+    const range = selection.getRangeAt(0);
+    if (!event.currentTarget.contains(range.commonAncestorContainer)) return;
+    const text = selection.toString().replace(/\s+/g, " ").trim();
+    if (text.length >= 8) {
+      setSelectedText(text.slice(0, 1800));
+      setActiveTool("assistant");
+    }
+  }
+
+  const graphNodes = graph?.nodes.slice(0, 8) || [];
+
   return (
-    <main className="app-shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <GitBranch size={24} />
-          <div>
-            <h1>Open AlphaXiv</h1>
-            <p>MVP1 local research graph</p>
-          </div>
+    <main className="reader-shell">
+      <header className="reader-topbar">
+        <div className="brand-mark">
+          <GitBranch size={22} />
+          <span>Open AlphaXiv Local</span>
         </div>
-
-        <section className="panel">
-          <h2><Settings size={16} /> Provider</h2>
-          <button className="primary" onClick={createMockProvider}>
-            <Plus size={16} /> Create local mock
+        <form
+          className="ingest-bar"
+          onSubmit={(event) => {
+            event.preventDefault();
+            ingestPaper().catch((err) => setError(String(err.message || err)));
+          }}
+        >
+          <Search size={17} />
+          <input
+            value={source}
+            onChange={(event) => setSource(event.target.value)}
+            aria-label="arXiv URL"
+          />
+          <button className="primary" type="submit">
+            <Plus size={16} /> Import
           </button>
-          {providers.map((provider) => (
-            <div className="provider" key={provider.id}>
-              <strong>{provider.name}</strong>
-              <span>{provider.provider_type} / {provider.model}</span>
-              <small>{provider.health_status}</small>
-            </div>
-          ))}
-        </section>
+        </form>
+        <div className="topbar-actions">
+          <span className={codexStatus?.status === "ready" ? "health ready" : "health"}>
+            <KeyRound size={15} /> Codex {codexStatus?.status === "ready" ? "ready" : "local"}
+          </span>
+          <span className="health"><HeartPulse size={15} /> {status}</span>
+        </div>
+      </header>
 
-        <section className="panel">
-          <h2><Search size={16} /> Ingest</h2>
-          <input value={source} onChange={(event) => setSource(event.target.value)} />
-          <button className="primary" onClick={ingestPaper}>
-            <Plus size={16} /> Ingest arXiv paper
-          </button>
-        </section>
+      {error ? <div className="error-banner">{error}</div> : null}
 
-        <section className="paper-list">
+      <section className="library-strip">
+        <select
+          value={selectedPaper?.id || ""}
+          onChange={(event) => setSelectedPaperId(Number(event.target.value))}
+          aria-label="Paper library"
+        >
           {papers.map((paper) => (
-            <button
-              key={paper.id}
-              className={paper.id === selectedPaper?.id ? "paper-item active" : "paper-item"}
-              onClick={() => setSelectedPaperId(paper.id)}
-            >
-              <strong>{paper.title}</strong>
-              <span>{paper.status} · {paper.chunk_count || 0} chunks</span>
-            </button>
+            <option key={paper.id} value={paper.id}>
+              {paper.title}
+            </option>
           ))}
-        </section>
-      </aside>
-
-      <section className="workspace">
-        <header className="topbar">
-          <div>
-            <span className="status"><HeartPulse size={16} /> {status}</span>
-            {error ? <span className="error">{error}</span> : null}
-          </div>
-          {selectedPaper ? (
-            <a className="download" href={`${API_URL}/api/papers/${selectedPaper.id}/export.md`}>
-              <Download size={16} /> Export Markdown
-            </a>
-          ) : null}
-        </header>
-
+        </select>
+        <button className="quiet-button" onClick={createMockProvider}>
+          <Settings size={15} /> Mock provider
+        </button>
         {selectedPaper ? (
-          <div className="content-grid">
-            <article className="paper-detail">
-              <div className="paper-actions">
-                <button onClick={toggleBookmark}>
-                  <Bookmark size={16} /> {selectedPaper.bookmarked ? "Bookmarked" : "Bookmark"}
+          <a className="quiet-button" href={selectedPaper.landing_url} target="_blank" rel="noreferrer">
+            <ExternalLink size={15} /> arXiv
+          </a>
+        ) : null}
+        {selectedPaper ? (
+          <a className="quiet-button" href={`${API_URL}/api/papers/${selectedPaper.id}/export.md`}>
+            <Download size={15} /> Markdown
+          </a>
+        ) : null}
+      </section>
+
+      {selectedPaper ? (
+        <section className="reader-layout">
+          <article className="paper-reader" onMouseUp={captureSelection}>
+            <div className="paper-title-row">
+              <div>
+                <span className="paper-kicker">arXiv:{selectedPaper.arxiv_id}</span>
+                <h1>{selectedPaper.title}</h1>
+                <p className="authors">{selectedPaper.authors.join(", ")}</p>
+              </div>
+              <button className="icon-button" onClick={toggleBookmark} aria-label="Bookmark paper">
+                <Bookmark size={18} fill={selectedPaper.bookmarked ? "currentColor" : "none"} />
+              </button>
+            </div>
+
+            <section className="reader-abstract">
+              <h2>Abstract</h2>
+              <p>{selectedPaper.abstract}</p>
+            </section>
+
+            <section className="reader-chunks">
+              {chunks.map((chunk) => (
+                <article className="chunk-block" key={chunk.id}>
+                  <div className="chunk-heading">
+                    <span>{chunk.section_path}</span>
+                    <small>chunk {chunk.id}</small>
+                  </div>
+                  <p>{chunk.text}</p>
+                </article>
+              ))}
+            </section>
+          </article>
+
+          <aside className="tool-panel">
+            <nav className="tool-tabs" aria-label="Paper tools">
+              {[
+                ["assistant", MessageSquare],
+                ["notes", Clipboard],
+                ["similar", Network],
+                ["codex", KeyRound]
+              ].map(([name, Icon]) => (
+                <button
+                  key={String(name)}
+                  className={activeTool === name ? "active" : ""}
+                  onClick={() => setActiveTool(name as typeof activeTool)}
+                  aria-label={String(name)}
+                >
+                  <Icon size={17} />
                 </button>
-                <label>
-                  <Tags size={16} />
+              ))}
+            </nav>
+
+            {activeTool === "assistant" ? (
+              <section className="tool-section">
+                <div className="tool-heading">
+                  <h2><Sparkles size={18} /> Assistant</h2>
+                  <span>{chunks.length} chunks</span>
+                </div>
+                {selectedText ? (
+                  <div className="selected-quote">
+                    <Quote size={15} />
+                    <p>{selectedText}</p>
+                    <button onClick={() => setSelectedText("")}>Clear</button>
+                  </div>
+                ) : null}
+                <textarea value={query} onChange={(event) => setQuery(event.target.value)} />
+                <button className="primary wide" onClick={askPaper}>
+                  <MessageSquare size={16} /> Ask paper
+                </button>
+                {chatResult ? (
+                  <div className="answer">
+                    <p>{chatResult.answer}</p>
+                    {chatResult.citations.map((citation) => (
+                      <blockquote key={citation.chunk_id}>
+                        <strong>chunk:{citation.chunk_id}</strong>
+                        <span>{citation.section_path} · score {citation.score}</span>
+                        <p>{citation.text}</p>
+                      </blockquote>
+                    ))}
+                  </div>
+                ) : null}
+              </section>
+            ) : null}
+
+            {activeTool === "notes" ? (
+              <section className="tool-section">
+                <div className="tool-heading">
+                  <h2><Tags size={18} /> Notes</h2>
+                </div>
+                <label className="field-label">
+                  Tags
                   <input
                     defaultValue={selectedPaper.tags.join(", ")}
                     onBlur={(event) => saveTags(event.target.value)}
-                    placeholder="tags, separated, by comma"
                   />
                 </label>
-              </div>
-              <h2>{selectedPaper.title}</h2>
-              <p className="authors">{selectedPaper.authors.join(", ")}</p>
-              <p>{selectedPaper.summary}</p>
-              <a href={selectedPaper.landing_url} target="_blank" rel="noreferrer">Open source paper</a>
-            </article>
-
-            <section className="chat-panel">
-              <h2><MessageSquare size={18} /> Cited Chat</h2>
-              <textarea value={query} onChange={(event) => setQuery(event.target.value)} />
-              <button className="primary" onClick={askPaper}>Ask with citations</button>
-              {chatResult ? (
-                <div className="answer">
-                  <p>{chatResult.answer}</p>
-                  {chatResult.citations.map((citation) => (
-                    <blockquote key={citation.chunk_id}>
-                      <strong>chunk:{citation.chunk_id}</strong> {citation.section_path} · score {citation.score}
-                      <span>{citation.text}</span>
-                    </blockquote>
+                <div className="provider-list">
+                  {providers.map((provider) => (
+                    <div className="provider-row" key={provider.id}>
+                      <strong>{provider.name}</strong>
+                      <span>{provider.provider_type} / {provider.model}</span>
+                      <small>{provider.health_status}</small>
+                    </div>
                   ))}
                 </div>
-              ) : null}
-            </section>
+              </section>
+            ) : null}
 
-            <section className="graph-panel">
-              <div className="graph-header">
-                <h2><GitBranch size={18} /> Literature Graph</h2>
-                <div className="tabs">
-                  {["related", "prior", "derivative"].map((view) => (
-                    <button
-                      key={view}
-                      className={view === graphView ? "active" : ""}
-                      onClick={() => setGraphView(view)}
-                    >
-                      {view}
-                    </button>
+            {activeTool === "similar" ? (
+              <section className="tool-section">
+                <div className="graph-header compact">
+                  <h2><GitBranch size={18} /> Similar</h2>
+                  <div className="tabs">
+                    {["related", "prior", "derivative"].map((view) => (
+                      <button
+                        key={view}
+                        className={view === graphView ? "active" : ""}
+                        onClick={() => setGraphView(view)}
+                      >
+                        {view}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="related-list">
+                  {graphNodes.map((node) => (
+                    <article key={node.id} className={`node-row ${node.group}`}>
+                      <strong>{node.group}</strong>
+                      <span>{node.title}</span>
+                      <small>{node.year} · {node.citation_count} citations</small>
+                    </article>
                   ))}
                 </div>
-              </div>
-              <Graph graph={graph} />
-            </section>
-          </div>
-        ) : (
-          <div className="empty-state">
-            <h2>No papers yet</h2>
-            <p>Create the mock provider, then ingest an arXiv paper.</p>
-          </div>
-        )}
-      </section>
+              </section>
+            ) : null}
+
+            {activeTool === "codex" ? (
+              <section className="tool-section">
+                <div className="tool-heading">
+                  <h2><KeyRound size={18} /> Codex</h2>
+                  <span>{codexStatus?.status || "unknown"}</span>
+                </div>
+                <div className="codex-grid">
+                  <StatusLine label="CLI" value={codexStatus?.codex_cli_available} />
+                  <StatusLine label="Access token" value={codexStatus?.codex_access_token_present} />
+                  <StatusLine label="Auth JSON" value={codexStatus?.codex_auth_json_configured} />
+                </div>
+                <p className="codex-boundary">{codexStatus?.integration_boundary}</p>
+                <div className="auth-modes">
+                  {codexStatus?.auth_modes.map((mode) => <span key={mode}>{mode}</span>)}
+                </div>
+              </section>
+            ) : null}
+          </aside>
+        </section>
+      ) : (
+        <div className="empty-state">
+          <BookOpen size={28} />
+          <h2>No paper imported</h2>
+          <p>Paste an arXiv URL in the top bar.</p>
+        </div>
+      )}
     </main>
+  );
+}
+
+function StatusLine({ label, value }: { label: string; value?: boolean }) {
+  return (
+    <div className={value ? "status-line ok" : "status-line"}>
+      <CheckCircle2 size={16} />
+      <span>{label}</span>
+      <strong>{value ? "yes" : "no"}</strong>
+    </div>
   );
 }
 
@@ -372,10 +527,10 @@ function LoginPage() {
           <div className="service-row planned">
             <KeyRound size={18} />
             <div>
-              <strong>GitHub OAuth</strong>
-              <span>planned connector</span>
+              <strong>Codex connector</strong>
+              <span>local Codex auth status</span>
             </div>
-            <em>not wired</em>
+            <em>optional</em>
           </div>
         </div>
       </section>

@@ -27,6 +27,7 @@ OpenAI-compatible large language model APIs.
 Detailed source links:
 
 - alphaXiv homepage: `https://www.alphaxiv.org/`
+- alphaXiv paper page sample: `https://www.alphaxiv.org/abs/2606.25996`
 - Connected Papers homepage: `https://www.connectedpapers.com/`
 - Connected Papers UI bundle inspected for public product text:
   `https://www.connectedpapers.com/assets/index-DcBynCAl.js`
@@ -53,6 +54,9 @@ Detailed source links:
   `https://platform.openai.com/docs/api-reference/responses`
 - OpenAI embeddings guide:
   `https://developers.openai.com/api/docs/guides/embeddings`
+- OpenAI Codex manual sections on ChatGPT sign-in, access tokens, SDK,
+  and app server, generated from official OpenAI documentation on
+  2026-06-28.
 
 ## alphaXiv Functional Survey
 
@@ -61,6 +65,8 @@ Observed public features:
 - Explore feed with recently added research items.
 - Search box labeled "Ask or search anything..." with smart search and style
   controls.
+- Paper pages expose a `Paper` view with adjacent `Assistant`, `My Notes`,
+  `Comments`, and `Similar` tool surfaces.
 - Paper cards with title, date, authors, short generated summary, tags,
   counts, bookmark action, audio action, and related GitHub links when present.
 - "View blog" action on paper cards, implying a generated or curated article
@@ -80,6 +86,10 @@ Product interpretation:
   explanations.
 - The MVP should focus on local paper ingestion, search, paper detail, chat,
   generated summaries, bookmarks, and graph-based related-paper discovery.
+- The paper detail screen should prioritize a reader-first layout: source
+  paper on the left, assistant and paper tools on the right. Selected text from
+  the reader should become explicit chat context so cited answers can focus on
+  the passage the user is reading.
 - Audio, public profiles, Pro billing, event programming, and browser extension
   support should be post-MVP unless explicitly prioritized.
 
@@ -198,6 +208,20 @@ OpenAI Codex through GitHub Copilot:
 - "Sign in with Copilot" in the OpenAI Codex VS Code extension is limited to
   GitHub Copilot Pro+ and Copilot Max subscribers.
 
+OpenAI Codex official authentication boundary:
+
+- Codex supports ChatGPT sign-in and API-key login for Codex surfaces such as
+  the web product, CLI, IDE extension, SDK, and app server.
+- Browser sign-in for Codex returns credentials to Codex clients. It is not a
+  documented third-party browser OAuth flow that another local web app can use
+  as a generic LLM provider credential.
+- Enterprise and Business environments can create Codex access tokens for
+  trusted automation. These tokens are scoped to Codex permissions and should
+  not be treated as ordinary OpenAI API keys.
+- The Codex SDK and app server are appropriate for optional local agent
+  automation around software-development tasks. They are not the default model
+  call path for paper question answering.
+
 Product boundary:
 
 - MVP must not promise unrestricted access to Copilot or Codex as generic model
@@ -207,6 +231,9 @@ Product boundary:
     as user identity, repository access, and optional Copilot SDK or MCP flows.
   - Treat Codex and Copilot agent execution as optional connectors with explicit
     subscription, environment, and user-authentication requirements.
+  - Expose Codex local connector status separately from model-provider health so
+    users can distinguish "Codex CLI authenticated" from "paper chat model
+    provider configured."
 
 ## Requirements Derived From Survey
 
@@ -215,6 +242,10 @@ MVP must include:
 - Local web UI.
 - Docker Compose deployment.
 - arXiv URL ingestion.
+- alphaXiv-like paper reader with paper content on the left and assistant tools
+  on the right.
+- Selection-aware paper chat that includes highlighted reader text in retrieval
+  metadata and the answer focus.
 - PDF download, conversion, cleanup, chunking, and metadata extraction.
 - Graph-backed paper question answering.
 - OpenAI-compatible LLM provider configuration.

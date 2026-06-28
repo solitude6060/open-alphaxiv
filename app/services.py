@@ -408,20 +408,29 @@ class PaperService:
         )
         return {"id": session_id, "paper_id": paper_id, "title": title}
 
-    def ask(self, paper_id: int, query: str, session_id: int | None = None) -> dict[str, Any]:
+    def ask(
+        self,
+        paper_id: int,
+        query: str,
+        session_id: int | None = None,
+        selected_text: str = "",
+    ) -> dict[str, Any]:
         if session_id is None:
             session_id = self.create_chat_session(paper_id)["id"]
+        selected_text = clean_ws(selected_text)[:1800]
+        retrieval_query = f"{query}\n\nSelected passage:\n{selected_text}" if selected_text else query
         user_message_id = self.store.execute(
             "INSERT INTO chat_messages (session_id, role, content, metadata_json, created_at) VALUES (?, 'user', ?, '{}', ?)",
             (session_id, query, utcnow()),
         )
-        ranked = self.retrieve(paper_id, query)
-        answer = mock_answer(query, ranked)
+        ranked = self.retrieve(paper_id, retrieval_query)
+        answer = mock_answer(query, ranked, selected_text)
         metadata = {
             "provider": "mock",
             "model": "mvp1-cited-extractive",
             "retrieved_chunk_ids": [item["id"] for item in ranked],
             "retrieval": ranked,
+            "selected_text_preview": selected_text[:240],
             "user_message_id": user_message_id,
         }
         assistant_message_id = self.store.execute(
@@ -612,14 +621,18 @@ def summarize(title: str, abstract: str) -> str:
     return f"{title}: {text}"
 
 
-def mock_answer(query: str, chunks: list[dict[str, Any]]) -> str:
+def mock_answer(query: str, chunks: list[dict[str, Any]], selected_text: str = "") -> str:
     if not chunks:
         return "No indexed context is available for this paper yet."
     evidence = " ".join(chunk["text"] for chunk in chunks[:2])
     excerpt = evidence[:520].rsplit(" ", 1)[0]
     citations = ", ".join(f"[chunk:{chunk['id']}]" for chunk in chunks[:3])
+    focus = ""
+    if selected_text:
+        selected_excerpt = selected_text[:260].rsplit(" ", 1)[0] or selected_text[:260]
+        focus = f"Selected passage focus: {selected_excerpt}. "
     return (
-        f"Answer based on local retrieved context: {excerpt}. "
+        f"{focus}Answer based on local retrieved context: {excerpt}. "
         f"This is an MVP1 extractive response to: '{query}'. Sources: {citations}."
     )
 

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import os
+from pathlib import Path
+import shutil
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Response
@@ -44,6 +47,7 @@ class ChatAsk(BaseModel):
     paper_id: int
     query: str
     session_id: int | None = None
+    selected_text: str = ""
 
 
 @lru_cache(maxsize=1)
@@ -83,6 +87,24 @@ def create_app() -> FastAPI:
     @app.get("/api/health")
     def health() -> dict[str, Any]:
         return {"status": "ok", "version": "0.1.0-mvp1", "storage_dir": str(settings.storage_dir)}
+
+    @app.get("/api/codex/status")
+    def codex_status() -> dict[str, Any]:
+        auth_json_path = os.environ.get("CODEX_AUTH_JSON_PATH", "")
+        auth_json_configured = bool(auth_json_path and Path(auth_json_path).exists())
+        access_token_present = bool(os.environ.get("CODEX_ACCESS_TOKEN"))
+        cli_path = shutil.which("codex")
+        return {
+            "status": "ready" if cli_path and (access_token_present or auth_json_configured) else "not_configured",
+            "codex_cli_available": bool(cli_path),
+            "codex_access_token_present": access_token_present,
+            "codex_auth_json_configured": auth_json_configured,
+            "auth_modes": ["chatgpt_login", "api_key", "access_token"],
+            "integration_boundary": (
+                "Codex ChatGPT sign-in authenticates local Codex clients. "
+                "It is not exposed as a generic browser OAuth flow for this paper chat app."
+            ),
+        }
 
     @app.post("/api/providers")
     def create_provider(payload: ProviderCreate) -> dict[str, Any]:
@@ -135,7 +157,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/chat/messages")
     def ask(payload: ChatAsk) -> dict[str, Any]:
-        return service().ask(payload.paper_id, payload.query, payload.session_id)
+        return service().ask(payload.paper_id, payload.query, payload.session_id, payload.selected_text)
 
     @app.get("/api/chat/messages/{message_id}/retrieval")
     def retrieval(message_id: int) -> dict[str, Any]:
