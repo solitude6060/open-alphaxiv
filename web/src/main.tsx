@@ -6,6 +6,7 @@ import {
   Bookmark,
   CheckCircle2,
   Clipboard,
+  Crop,
   Database,
   Download,
   ExternalLink,
@@ -21,7 +22,8 @@ import {
   Settings,
   ShieldCheck,
   Sparkles,
-  Tags
+  Tags,
+  X
 } from "lucide-react";
 import "./styles.css";
 
@@ -38,6 +40,8 @@ type Paper = {
   bookmarked: boolean;
   tags: string[];
   chunk_count?: number;
+  full_text_available?: boolean;
+  page_image_count?: number;
   landing_url: string;
 };
 
@@ -73,15 +77,39 @@ type ChatResult = {
     provider: string;
     model: string;
     answer_mode: "mock" | "codex";
+    context_strategy?: string;
+    paper_context_chars?: number;
+    selected_image?: ImageSelection | null;
   };
 };
 
-type Chunk = {
-  id: number;
-  section_path: string;
-  chunk_index: number;
+type PaperText = {
+  paper_id: number;
+  source: string;
   text: string;
-  token_count: number;
+  character_count: number;
+};
+
+type PaperPage = {
+  paper_id: number;
+  page_number: number;
+  image_url: string;
+};
+
+type ImageSelection = {
+  page: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+type ImageDrag = {
+  page: number;
+  startX: number;
+  startY: number;
+  currentX: number;
+  currentY: number;
 };
 
 type CodexStatus = {
@@ -125,7 +153,10 @@ function App() {
   const [query, setQuery] = useState("What is the core contribution?");
   const [answerMode, setAnswerMode] = useState<"mock" | "codex">("mock");
   const [selectedText, setSelectedText] = useState("");
-  const [chunks, setChunks] = useState<Chunk[]>([]);
+  const [selectedImage, setSelectedImage] = useState<ImageSelection | null>(null);
+  const [imageDrag, setImageDrag] = useState<ImageDrag | null>(null);
+  const [paperText, setPaperText] = useState<PaperText | null>(null);
+  const [pages, setPages] = useState<PaperPage[]>([]);
   const [chatResult, setChatResult] = useState<ChatResult | null>(null);
   const [graphView, setGraphView] = useState("related");
   const [graph, setGraph] = useState<{ nodes: GraphNode[]; edges: GraphEdge[] } | null>(null);
@@ -172,6 +203,12 @@ function App() {
     }
   }, [selectedPaper?.id, graphView]);
 
+  useEffect(() => {
+    setSelectedText("");
+    setSelectedImage(null);
+    setChatResult(null);
+  }, [selectedPaper?.id]);
+
   async function createMockProvider() {
     setError("");
     setStatus("Creating provider");
@@ -206,13 +243,14 @@ function App() {
   async function askPaper() {
     if (!selectedPaper) return;
     setError("");
-    setStatus("Retrieving cited context");
+    setStatus(answerMode === "codex" ? "Asking Codex with paper context" : "Asking local mock model");
     const result = await request<ChatResult>("/api/chat/messages", {
       method: "POST",
       body: JSON.stringify({
         paper_id: selectedPaper.id,
         query,
         selected_text: selectedText,
+        selected_image: selectedImage,
         answer_mode: answerMode
       })
     });
@@ -221,13 +259,15 @@ function App() {
   }
 
   async function loadPaperData(paperId: number, view: string) {
-    const [chunkRows, graphData] = await Promise.all([
-      request<Chunk[]>(`/api/papers/${paperId}/chunks`),
+    const [textData, pageRows, graphData] = await Promise.all([
+      request<PaperText>(`/api/papers/${paperId}/fulltext`),
+      request<PaperPage[]>(`/api/papers/${paperId}/pages`),
       request<{ nodes: GraphNode[]; edges: GraphEdge[] }>(
         `/api/papers/${paperId}/literature-graph?view=${view}`
       )
     ]);
-    setChunks(chunkRows);
+    setPaperText(textData);
+    setPages(pageRows);
     setGraph(graphData);
   }
 
@@ -261,7 +301,72 @@ function App() {
     }
   }
 
+  function imagePoint(event: React.MouseEvent<HTMLDivElement>) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const x = Math.max(0, Math.min(100, ((event.clientX - rect.left) / rect.width) * 100));
+    const y = Math.max(0, Math.min(100, ((event.clientY - rect.top) / rect.height) * 100));
+    return { x, y };
+  }
+
+  function beginImageSelection(event: React.MouseEvent<HTMLDivElement>, page: number) {
+    event.preventDefault();
+    const point = imagePoint(event);
+    setImageDrag({ page, startX: point.x, startY: point.y, currentX: point.x, currentY: point.y });
+    setSelectedImage(null);
+    setActiveTool("assistant");
+  }
+
+  function updateImageSelection(event: React.MouseEvent<HTMLDivElement>) {
+    if (!imageDrag) return;
+    event.preventDefault();
+    const point = imagePoint(event);
+    setImageDrag({ ...imageDrag, currentX: point.x, currentY: point.y });
+  }
+
+  function finishImageSelection() {
+    if (!imageDrag) return;
+    const x = Math.min(imageDrag.startX, imageDrag.currentX);
+    const y = Math.min(imageDrag.startY, imageDrag.currentY);
+    const width = Math.abs(imageDrag.currentX - imageDrag.startX);
+    const height = Math.abs(imageDrag.currentY - imageDrag.startY);
+    if (width >= 1 && height >= 1) {
+      setSelectedImage({
+        page: imageDrag.page,
+        x: roundPercent(x),
+        y: roundPercent(y),
+        width: roundPercent(width),
+        height: roundPercent(height)
+      });
+    }
+    setImageDrag(null);
+  }
+
+  function imageSelectionBox(page: number) {
+    const active = imageDrag?.page === page ? imageDrag : null;
+    if (active) {
+      return {
+        left: Math.min(active.startX, active.currentX),
+        top: Math.min(active.startY, active.currentY),
+        width: Math.abs(active.currentX - active.startX),
+        height: Math.abs(active.currentY - active.startY)
+      };
+    }
+    if (selectedImage?.page === page) {
+      return {
+        left: selectedImage.x,
+        top: selectedImage.y,
+        width: selectedImage.width,
+        height: selectedImage.height
+      };
+    }
+    return null;
+  }
+
   const graphNodes = graph?.nodes.slice(0, 8) || [];
+  const paperParagraphs = useMemo(
+    () => (paperText?.text || selectedPaper?.abstract || "").split(/\n{2,}/).filter(Boolean),
+    [paperText?.text, selectedPaper?.abstract]
+  );
 
   return (
     <main className="reader-shell">
@@ -343,17 +448,56 @@ function App() {
               <p>{selectedPaper.abstract}</p>
             </section>
 
-            <section className="reader-chunks">
-              {chunks.map((chunk) => (
-                <article className="chunk-block" key={chunk.id}>
-                  <div className="chunk-heading">
-                    <span>{chunk.section_path}</span>
-                    <small>chunk {chunk.id}</small>
-                  </div>
-                  <p>{chunk.text}</p>
-                </article>
-              ))}
+            <section className="reader-fulltext">
+              <div className="section-title-row">
+                <h2>Full text</h2>
+                <span>{paperText?.source || "abstract"}</span>
+              </div>
+              <div className="paper-text-body">
+                {paperParagraphs.map((paragraph, index) => (
+                  <p key={`${index}-${paragraph.slice(0, 16)}`}>{paragraph}</p>
+                ))}
+              </div>
             </section>
+
+            {pages.length > 0 ? (
+              <section className="reader-pages" aria-label="Paper page images">
+                <div className="section-title-row">
+                  <h2>Pages</h2>
+                  <span>{pages.length} images</span>
+                </div>
+                <div className="page-gallery">
+                  {pages.map((page) => {
+                    const box = imageSelectionBox(page.page_number);
+                    return (
+                      <article className="paper-page" key={page.page_number}>
+                        <div className="page-label">Page {page.page_number}</div>
+                        <div
+                          className="page-frame"
+                          onMouseDown={(event) => beginImageSelection(event, page.page_number)}
+                          onMouseMove={updateImageSelection}
+                          onMouseUp={finishImageSelection}
+                          onMouseLeave={finishImageSelection}
+                        >
+                          <img src={assetUrl(page.image_url)} alt={`Paper page ${page.page_number}`} />
+                          {box ? (
+                            <div
+                              className="image-selection"
+                              style={{
+                                left: `${box.left}%`,
+                                top: `${box.top}%`,
+                                width: `${box.width}%`,
+                                height: `${box.height}%`
+                              }}
+                            />
+                          ) : null}
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              </section>
+            ) : null}
           </article>
 
           <aside className="tool-panel">
@@ -379,7 +523,7 @@ function App() {
               <section className="tool-section">
                 <div className="tool-heading">
                   <h2><Sparkles size={18} /> Assistant</h2>
-                  <span>{answerMode === "codex" ? "codex" : `${chunks.length} chunks`}</span>
+                  <span>{answerMode === "codex" ? "full text" : "local mock"}</span>
                 </div>
                 <div className="mode-switch" aria-label="Answer mode">
                   <button
@@ -408,6 +552,17 @@ function App() {
                     <button onClick={() => setSelectedText("")}>Clear</button>
                   </div>
                 ) : null}
+                {selectedImage ? (
+                  <div className="selected-image-card">
+                    <Crop size={15} />
+                    <p>
+                      Page {selectedImage.page} · {selectedImage.width}% × {selectedImage.height}%
+                    </p>
+                    <button onClick={() => setSelectedImage(null)} aria-label="Clear selected image">
+                      <X size={14} />
+                    </button>
+                  </div>
+                ) : null}
                 <textarea value={query} onChange={(event) => setQuery(event.target.value)} />
                 <button className="primary wide" onClick={askPaper}>
                   <MessageSquare size={16} /> Ask paper
@@ -416,15 +571,9 @@ function App() {
                   <div className="answer">
                     <div className="answer-meta">
                       {chatResult.retrieval.provider} / {chatResult.retrieval.model}
+                      {chatResult.retrieval.context_strategy === "full_text" ? " / full text" : ""}
                     </div>
                     <p>{chatResult.answer}</p>
-                    {chatResult.citations.map((citation) => (
-                      <blockquote key={citation.chunk_id}>
-                        <strong>chunk:{citation.chunk_id}</strong>
-                        <span>{citation.section_path} · score {citation.score}</span>
-                        <p>{citation.text}</p>
-                      </blockquote>
-                    ))}
                   </div>
                 ) : null}
               </section>
@@ -534,6 +683,14 @@ function StatusLine({ label, value }: { label: string; value?: boolean }) {
   );
 }
 
+function assetUrl(path: string) {
+  return path.startsWith("http") ? path : `${API_URL}${path}`;
+}
+
+function roundPercent(value: number) {
+  return Math.round(value * 10) / 10;
+}
+
 function LoginPage() {
   return (
     <main className="login-page">
@@ -595,7 +752,7 @@ function LoginPage() {
         <article>
           <FileSearch size={20} />
           <strong>arXiv ingest</strong>
-          <span>Metadata, Markdown, chunks, and citations.</span>
+          <span>Metadata, PDF text, page images, and Markdown export.</span>
         </article>
         <article>
           <Network size={20} />

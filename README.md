@@ -1,20 +1,22 @@
 # Open AlphaXiv
 
 Open AlphaXiv is a local-first research paper workspace for reading arXiv
-papers, importing paper metadata, asking cited questions, and keeping notes in
-one Docker-deployable app.
+papers, importing PDF text and page images, asking paper questions, and keeping
+notes in one Docker-deployable app.
 
 The app is designed for researchers who want a private paper reading surface:
-paste an arXiv URL, read the imported paper in the browser, select passages, and
-ask questions against the paper context. Answers include chunk citations so the
-reader can move from summary back to source text.
+paste an arXiv URL, read the imported paper in the browser, select passages or
+page regions, and ask questions against the paper context.
 
 ## What You Can Do
 
 - Import a paper from an arXiv URL.
-- Read the paper in a two-pane workspace with the assistant beside the reader.
+- Read extracted paper text in a two-pane workspace with the assistant beside
+  the reader.
 - Select text from the paper and ask targeted questions about that passage.
-- Ask cited questions against retrieved paper chunks.
+- Select PDF page regions to include visual-region metadata in a question.
+- Ask Codex questions against extracted paper text without exposing retrieval
+  chunks in the reader.
 - Use the built-in mock answer mode for local development without an external
   model.
 - Use local Codex through `codex exec` for paper Q&A when the host machine is
@@ -56,14 +58,23 @@ Paste an arXiv paper URL into the import field, for example:
 https://arxiv.org/abs/1706.03762
 ```
 
-The API stores the paper metadata, creates Markdown content, chunks the text,
-builds local retrieval data, and makes the paper available in the reader.
+The API stores the paper metadata, downloads the PDF when available, extracts
+text with Poppler, renders page images, creates Markdown content, builds local
+retrieval data for mock mode and graph construction, and makes the paper
+available in the reader.
+
+The Docker images include `poppler-utils` for PDF text and page-image
+extraction. When running the API directly on the host, install Poppler so
+`pdftotext` and `pdftoppm` are available on `PATH`; otherwise Open AlphaXiv
+falls back to metadata and abstract text.
 
 ## Local Codex Paper Q&A
 
 Open AlphaXiv can answer paper questions with a local Codex agent. The backend
-runs `codex exec` in read-only sandbox mode and sends only the selected passage
-plus retrieved paper chunks as prompt context.
+runs `codex exec` in read-only sandbox mode and sends paper metadata, selected
+passage text, selected image-region metadata, and extracted paper text as prompt
+context. The prompt uses a conservative size limit and adds a truncation marker
+when a paper is too long for the local prompt budget.
 
 Codex login is handled by the host CLI, not by the web UI:
 

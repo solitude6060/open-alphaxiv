@@ -63,6 +63,15 @@ def fetch_text(url: str, timeout: float = 8.0) -> str | None:
         return None
 
 
+def fetch_binary(url: str, timeout: float = 20.0, max_bytes: int = 50_000_000) -> bytes | None:
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "open-alphaxiv-mvp1/0.1"})
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            return response.read(max_bytes)
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        return None
+
+
 def arxiv_metadata(arxiv_id: str) -> dict[str, Any]:
     feed = fetch_text(f"https://export.arxiv.org/api/query?id_list={arxiv_id}")
     if not feed:
@@ -108,7 +117,20 @@ def clean_ws(text: str) -> str:
     return re.sub(r"\s+", " ", text.replace("&amp;", "&")).strip()
 
 
-def build_markdown(meta: dict[str, Any], arxiv_id: str) -> str:
+def build_markdown(meta: dict[str, Any], arxiv_id: str, full_text: str = "") -> str:
+    body = clean_extracted_text(full_text)
+    full_text_section = (
+        f"## Full Text\n\n{body}"
+        if body
+        else textwrap.dedent(
+            """
+            ## Full Text
+
+            Full text could not be extracted in the current environment. The abstract
+            remains available for local reading and question answering.
+            """
+        ).strip()
+    )
     return textwrap.dedent(
         f"""
         # {meta['title']}
@@ -121,23 +143,78 @@ def build_markdown(meta: dict[str, Any], arxiv_id: str) -> str:
 
         {meta['abstract']}
 
-        ## Local Reading Notes
-
-        This MVP1 conversion stores a Markdown representation that can be chunked,
-        embedded, searched, cited, and exported. A later converter can replace this
-        fallback with full PDF extraction while preserving the same storage contract.
-
-        ## Method Signals
-
-        The paper should be inspected for problem statement, assumptions, method,
-        experiments, limitations, citations, and implementation clues.
-
-        ## Retrieval Checklist
-
-        Questions should be answered from retrieved chunks. Every generated answer
-        must include chunk citations so the user can audit the source context.
+        {full_text_section}
         """
     ).strip()
+
+
+def clean_extracted_text(text: str) -> str:
+    lines = [line.strip() for line in text.replace("\x00", "").splitlines()]
+    compact: list[str] = []
+    blank = False
+    for line in lines:
+        if line.strip():
+            compact.append(line)
+            blank = False
+        elif not blank:
+            compact.append("")
+            blank = True
+    return "\n".join(compact).strip()
+
+
+def extract_pdf_text(pdf_path: Path, timeout: float = 30.0) -> str:
+    pdftotext = shutil.which("pdftotext")
+    if not pdftotext:
+        return ""
+    try:
+        result = subprocess.run(
+            [pdftotext, "-layout", "-enc", "UTF-8", str(pdf_path), "-"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if result.returncode != 0:
+        return ""
+    return clean_extracted_text(result.stdout)
+
+
+def render_pdf_page_images(pdf_path: Path, output_dir: Path, max_pages: int = 12) -> list[Path]:
+    pdftoppm = shutil.which("pdftoppm")
+    if not pdftoppm:
+        return []
+    output_dir.mkdir(parents=True, exist_ok=True)
+    prefix = output_dir / "page"
+    try:
+        result = subprocess.run(
+            [
+                pdftoppm,
+                "-png",
+                "-r",
+                "120",
+                "-f",
+                "1",
+                "-l",
+                str(max_pages),
+                str(pdf_path),
+                str(prefix),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []
+    normalized: list[Path] = []
+    for index, path in enumerate(sorted(output_dir.glob("page-*.png")), start=1):
+        target = output_dir / f"page-{index:03d}.png"
+        if path != target:
+            path.replace(target)
+        normalized.append(target)
+    return normalized
 
 
 def chunk_markdown(markdown: str, max_words: int = 120) -> list[dict[str, Any]]:
@@ -286,9 +363,64 @@ class PaperService:
                 now,
             ),
         )
-        markdown = build_markdown(meta, arxiv_id)
         paper_dir = self.storage_dir / "papers" / str(paper_id)
         paper_dir.mkdir(parents=True, exist_ok=True)
+        pdf_bytes = fetch_binary(meta["pdf_url"])
+        full_text = ""
+        if pdf_bytes:
+            pdf_path = paper_dir / "paper.pdf"
+            pdf_path.write_bytes(pdf_bytes)
+            self.store.execute(
+                """
+                INSERT INTO artifacts
+                    (paper_id, artifact_type, storage_uri, content_hash, metadata_json, created_at)
+                VALUES (?, 'pdf', ?, ?, ?, ?)
+                """,
+                (
+                    paper_id,
+                    str(pdf_path),
+                    hashlib.sha256(pdf_bytes).hexdigest(),
+                    dumps({"source": meta["pdf_url"]}),
+                    now,
+                ),
+            )
+            full_text = extract_pdf_text(pdf_path)
+            if full_text:
+                text_path = paper_dir / "paper.txt"
+                text_path.write_text(full_text, encoding="utf-8")
+                self.store.execute(
+                    """
+                    INSERT INTO artifacts
+                        (paper_id, artifact_type, storage_uri, content_hash, metadata_json, created_at)
+                    VALUES (?, 'pdf_text', ?, ?, ?, ?)
+                    """,
+                    (
+                        paper_id,
+                        str(text_path),
+                        sha256_text(full_text),
+                        dumps({"source_artifact": "pdf", "extractor": "pdftotext"}),
+                        now,
+                    ),
+                )
+            for page_number, image_path in enumerate(
+                render_pdf_page_images(pdf_path, paper_dir / "pages"),
+                start=1,
+            ):
+                self.store.execute(
+                    """
+                    INSERT INTO artifacts
+                        (paper_id, artifact_type, storage_uri, content_hash, metadata_json, created_at)
+                    VALUES (?, 'page_image', ?, ?, ?, ?)
+                    """,
+                    (
+                        paper_id,
+                        str(image_path),
+                        hashlib.sha256(image_path.read_bytes()).hexdigest(),
+                        dumps({"page_number": page_number, "source_artifact": "pdf"}),
+                        now,
+                    ),
+                )
+        markdown = build_markdown(meta, arxiv_id, full_text)
         markdown_path = paper_dir / "paper.md"
         markdown_path.write_text(markdown, encoding="utf-8")
         self.store.execute(
@@ -372,17 +504,95 @@ class PaperService:
             )
         else:
             rows = self.store.query_all("SELECT * FROM papers ORDER BY id DESC")
-        return [paper_row(row) for row in rows]
+        return [self._with_asset_counts(paper_row(row)) for row in rows]
 
     def get_paper(self, paper_id: int) -> dict[str, Any]:
         row = self.store.query_one("SELECT * FROM papers WHERE id = ?", (paper_id,))
         if not row:
             raise KeyError("paper not found")
-        paper = paper_row(row)
+        paper = self._with_asset_counts(paper_row(row))
         paper["chunk_count"] = self.store.query_one(
             "SELECT COUNT(*) AS count FROM chunks WHERE paper_id = ?", (paper_id,)
         )["count"]
         return paper
+
+    def _with_asset_counts(self, paper: dict[str, Any]) -> dict[str, Any]:
+        paper_id = paper["id"]
+        text_artifact = self.store.query_one(
+            "SELECT id FROM artifacts WHERE paper_id = ? AND artifact_type = 'pdf_text' LIMIT 1",
+            (paper_id,),
+        )
+        page_count = self.store.query_one(
+            "SELECT COUNT(*) AS count FROM artifacts WHERE paper_id = ? AND artifact_type = 'page_image'",
+            (paper_id,),
+        )["count"]
+        paper["full_text_available"] = bool(text_artifact)
+        paper["page_image_count"] = page_count
+        return paper
+
+    def paper_text(self, paper_id: int) -> dict[str, Any]:
+        paper = self.get_paper(paper_id)
+        artifact = self.store.query_one(
+            """
+            SELECT * FROM artifacts
+            WHERE paper_id = ? AND artifact_type IN ('pdf_text', 'markdown')
+            ORDER BY CASE artifact_type WHEN 'pdf_text' THEN 0 ELSE 1 END, id
+            LIMIT 1
+            """,
+            (paper_id,),
+        )
+        if not artifact:
+            return {
+                "paper_id": paper_id,
+                "source": "abstract",
+                "text": paper["abstract"],
+                "character_count": len(paper["abstract"]),
+            }
+        text = clean_extracted_text(Path(artifact["storage_uri"]).read_text(encoding="utf-8"))
+        return {
+            "paper_id": paper_id,
+            "source": artifact["artifact_type"],
+            "text": text,
+            "character_count": len(text),
+        }
+
+    def paper_pages(self, paper_id: int) -> list[dict[str, Any]]:
+        rows = self.store.query_all(
+            """
+            SELECT * FROM artifacts
+            WHERE paper_id = ? AND artifact_type = 'page_image'
+            ORDER BY id
+            """,
+            (paper_id,),
+        )
+        pages: list[dict[str, Any]] = []
+        for index, row in enumerate(rows, start=1):
+            metadata = loads(row.get("metadata_json"), {})
+            page_number = int(metadata.get("page_number") or index)
+            pages.append(
+                {
+                    "paper_id": paper_id,
+                    "page_number": page_number,
+                    "image_url": f"/api/papers/{paper_id}/pages/{page_number}.png",
+                }
+            )
+        return pages
+
+    def paper_page_image_path(self, paper_id: int, page_number: int) -> Path:
+        rows = self.store.query_all(
+            """
+            SELECT * FROM artifacts
+            WHERE paper_id = ? AND artifact_type = 'page_image'
+            ORDER BY id
+            """,
+            (paper_id,),
+        )
+        for index, row in enumerate(rows, start=1):
+            metadata = loads(row.get("metadata_json"), {})
+            row_page_number = int(metadata.get("page_number") or index)
+            if row_page_number == page_number:
+                return Path(row["storage_uri"])
+        raise KeyError("page image not found")
 
     def chunks(self, paper_id: int) -> list[dict[str, Any]]:
         return self.store.query_all(
@@ -418,27 +628,37 @@ class PaperService:
         query: str,
         session_id: int | None = None,
         selected_text: str = "",
+        selected_image: dict[str, Any] | None = None,
         answer_mode: str = "mock",
         codex_options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if session_id is None:
             session_id = self.create_chat_session(paper_id)["id"]
         selected_text = clean_ws(selected_text)[:1800]
-        retrieval_query = f"{query}\n\nSelected passage:\n{selected_text}" if selected_text else query
         user_message_id = self.store.execute(
             "INSERT INTO chat_messages (session_id, role, content, metadata_json, created_at) VALUES (?, 'user', ?, '{}', ?)",
             (session_id, query, utcnow()),
         )
-        ranked = self.retrieve(paper_id, retrieval_query)
+        ranked: list[dict[str, Any]] = []
         provider = "mock"
         model = "mvp1-cited-extractive"
         run_metadata: dict[str, Any] = {}
         if answer_mode == "codex":
             paper = self.get_paper(paper_id)
-            answer, run_metadata = codex_answer(paper, query, ranked, selected_text, codex_options or {})
+            paper_context = self.paper_text(paper_id)["text"]
+            answer, run_metadata = codex_answer(
+                paper,
+                query,
+                paper_context,
+                selected_text,
+                selected_image,
+                codex_options or {},
+            )
             provider = "codex"
             model = run_metadata.get("model") or "codex-local-agent"
         elif answer_mode == "mock":
+            retrieval_query = f"{query}\n\nSelected passage:\n{selected_text}" if selected_text else query
+            ranked = self.retrieve(paper_id, retrieval_query)
             answer = mock_answer(query, ranked, selected_text)
         else:
             raise ValueError("answer_mode must be 'mock' or 'codex'")
@@ -449,6 +669,7 @@ class PaperService:
             "retrieved_chunk_ids": [item["id"] for item in ranked],
             "retrieval": ranked,
             "selected_text_preview": selected_text[:240],
+            "selected_image": selected_image or None,
             "user_message_id": user_message_id,
             **run_metadata,
         }
@@ -659,8 +880,9 @@ def mock_answer(query: str, chunks: list[dict[str, Any]], selected_text: str = "
 def codex_answer(
     paper: dict[str, Any],
     query: str,
-    chunks: list[dict[str, Any]],
+    paper_context: str,
     selected_text: str,
+    selected_image: dict[str, Any] | None,
     options: dict[str, Any],
 ) -> tuple[str, dict[str, Any]]:
     if not options.get("enabled"):
@@ -677,7 +899,7 @@ def codex_answer(
     if sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
         sandbox = "read-only"
     model = str(options.get("model") or "")
-    prompt = build_codex_paper_prompt(paper, query, chunks, selected_text)
+    prompt = build_codex_paper_prompt(paper, query, paper_context, selected_text, selected_image)
     command = [
         resolved_cli,
         "exec",
@@ -728,6 +950,8 @@ def codex_answer(
         "codex_sandbox": sandbox,
         "codex_cli_path": resolved_cli,
         "codex_stderr_preview": clean_ws(result.stderr)[-500:],
+        "context_strategy": "full_text",
+        "paper_context_chars": len(paper_context),
         "model": model or "codex-local-agent",
     }
 
@@ -735,27 +959,30 @@ def codex_answer(
 def build_codex_paper_prompt(
     paper: dict[str, Any],
     query: str,
-    chunks: list[dict[str, Any]],
+    paper_context: str,
     selected_text: str,
+    selected_image: dict[str, Any] | None,
 ) -> str:
-    chunk_lines = []
-    for chunk in chunks[:5]:
-        text = clean_ws(chunk["text"])[:1400]
-        chunk_lines.append(
-            f"[chunk:{chunk['id']}] section={chunk['section_path']} score={chunk['score']}\n{text}"
-        )
-    if not chunk_lines:
-        chunk_lines.append("(No retrieved chunks available for this paper.)")
+    context_limit = 75_000
+    clean_context = clean_extracted_text(paper_context)
+    if clean_context:
+        truncated = len(clean_context) > context_limit
+        context = clean_context[:context_limit]
+        if truncated:
+            context = context.rsplit(" ", 1)[0] + "\n\n[Paper context was truncated to fit the local Codex prompt budget.]"
+    else:
+        context = "(No extracted paper text is available.)"
     selected = clean_ws(selected_text)[:1800] or "(none)"
+    image = format_selected_image(selected_image)
     return textwrap.dedent(
         f"""
         You are answering a research paper question inside Open AlphaXiv Local.
 
         Constraints:
-        - Use only the paper metadata, selected passage, and retrieved chunks below.
+        - Use only the paper metadata, selected passage, selected image region metadata, and paper context below.
         - Do not edit files, run shell commands, browse the web, or ask for more context.
         - If the evidence is insufficient, say exactly what is missing.
-        - Cite evidence with [chunk:<id>] references.
+        - Prefer concise answers grounded in the paper context over retrieval-style chunk citations.
         - Keep the answer concise and technical.
 
         Paper:
@@ -766,13 +993,30 @@ def build_codex_paper_prompt(
         Selected passage:
         {selected}
 
+        Selected image region:
+        {image}
+
         Question:
         {query}
 
-        Retrieved chunks:
-        {chr(10).join(chunk_lines)}
+        Paper context:
+        {context}
         """
     ).strip()
+
+
+def format_selected_image(selected_image: dict[str, Any] | None) -> str:
+    if not selected_image:
+        return "(none)"
+    page = selected_image.get("page")
+    x = selected_image.get("x")
+    y = selected_image.get("y")
+    width = selected_image.get("width")
+    height = selected_image.get("height")
+    return (
+        f"page={page}, x={x}%, y={y}%, width={width}%, height={height}%."
+        " This identifies a visual region selected by the reader; no image pixels are attached in this prompt."
+    )
 
 
 def resolve_executable(path: str) -> str:

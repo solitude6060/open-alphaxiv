@@ -28,6 +28,20 @@ def deterministic_arxiv_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr("app.services.arxiv_metadata", metadata)
 
+    monkeypatch.setattr("app.services.fetch_binary", lambda url: b"%PDF-1.4 api fixture")
+    monkeypatch.setattr(
+        "app.services.extract_pdf_text",
+        lambda path: "API full paper text about attention layers and evaluation.",
+    )
+
+    def page_images(pdf_path: Path, output_dir: Path, max_pages: int = 12) -> list[Path]:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        page = output_dir / "page-001.png"
+        page.write_bytes(b"png")
+        return [page]
+
+    monkeypatch.setattr("app.services.render_pdf_page_images", page_images)
+
 
 @pytest.fixture()
 def app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FastAPI:
@@ -37,7 +51,7 @@ def app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FastAPI:
     service.cache_clear()
     monkeypatch.setenv("OPEN_ALPHAXIV_DATABASE_PATH", str(tmp_path / "api.db"))
     monkeypatch.setenv("OPEN_ALPHAXIV_STORAGE_DIR", str(tmp_path / "data"))
-    monkeypatch.setattr("app.main.asyncio.to_thread", immediate_to_thread)
+    monkeypatch.setattr("app.main.to_thread", immediate_to_thread)
     yield create_app()
     service.cache_clear()
 
@@ -98,6 +112,7 @@ async def test_chat_messages_accepts_codex_answer_mode_over_http(
                 "paper_id": paper_id,
                 "query": "Summarize the contribution",
                 "selected_text": "selected API context",
+                "selected_image": {"page": 1, "x": 10, "y": 20, "width": 30, "height": 40},
                 "answer_mode": "codex",
             },
         )
@@ -107,6 +122,26 @@ async def test_chat_messages_accepts_codex_answer_mode_over_http(
     assert payload["answer"] == "HTTP Codex answer [chunk:1]"
     assert payload["retrieval"]["provider"] == "codex"
     assert payload["retrieval"]["answer_mode"] == "codex"
+    assert payload["retrieval"]["context_strategy"] == "full_text"
+
+
+@pytest.mark.asyncio
+async def test_paper_full_text_and_page_manifest_over_http(app: FastAPI) -> None:
+    async with asgi_client(app) as client:
+        paper_response = await client.post("/api/papers", json={"source": "https://arxiv.org/abs/2201.08239"})
+        assert paper_response.status_code == 200
+        paper_id = paper_response.json()["id"]
+
+        text_response = await client.get(f"/api/papers/{paper_id}/fulltext")
+        pages_response = await client.get(f"/api/papers/{paper_id}/pages")
+        image_response = await client.get(f"/api/papers/{paper_id}/pages/1.png")
+
+    assert text_response.status_code == 200
+    assert "attention layers" in text_response.json()["text"]
+    assert pages_response.status_code == 200
+    assert pages_response.json()[0]["image_url"].endswith(f"/api/papers/{paper_id}/pages/1.png")
+    assert image_response.status_code == 200
+    assert image_response.headers["content-type"] == "image/png"
 
 
 @pytest.mark.asyncio
