@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from functools import lru_cache
 import os
 from pathlib import Path
@@ -138,7 +139,7 @@ def create_app() -> FastAPI:
     @app.post("/api/papers")
     async def create_paper(payload: PaperCreate) -> dict[str, Any]:
         try:
-            return service().ingest_paper(payload.source)
+            return await asyncio.to_thread(service().ingest_paper, payload.source)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -172,7 +173,8 @@ def create_app() -> FastAPI:
     @app.post("/api/chat/messages")
     async def ask(payload: ChatAsk) -> dict[str, Any]:
         try:
-            return service().ask(
+            return await asyncio.to_thread(
+                service().ask,
                 payload.paper_id,
                 payload.query,
                 payload.session_id,
@@ -216,7 +218,6 @@ def codex_options() -> dict[str, Any]:
         "timeout_seconds": settings.codex_timeout_seconds,
         "sandbox": settings.codex_sandbox,
         "codex_home": settings.codex_home,
-        "cwd": Path.cwd(),
     }
 
 

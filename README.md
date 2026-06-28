@@ -90,6 +90,9 @@ mounts:
 If the host Codex install uses file-based authentication, `auth.json` is mounted
 into the container. Treat that file as a password. The web UI displays Codex
 availability and setup commands, but it does not start or proxy `codex login`.
+The Codex home mount is writable because the Codex CLI may update local session
+state under `CODEX_HOME`; use a dedicated Codex home directory for this project
+if you do not want the container to write to your primary `~/.codex` directory.
 
 Relevant Codex settings:
 

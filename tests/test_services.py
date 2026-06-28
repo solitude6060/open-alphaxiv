@@ -192,6 +192,34 @@ def test_codex_empty_stdout_raises_runtime_error(
         )
 
 
+def test_codex_answer_uses_isolated_default_cwd(
+    service: PaperService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paper = service.ingest_paper("2201.08239")
+    captured: dict[str, object] = {}
+
+    def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        cwd = Path(str(kwargs["cwd"]))
+        captured["cwd_name"] = cwd.name
+        captured["cwd_exists_during_run"] = cwd.exists()
+        return SimpleNamespace(returncode=0, stdout="Codex answer [chunk:1]", stderr="")
+
+    monkeypatch.setattr("app.services.resolve_executable", lambda path: "/usr/local/bin/codex")
+    monkeypatch.setattr("app.services.codex_credentials_available", lambda options: True)
+    monkeypatch.setattr("app.services.subprocess.run", fake_run)
+
+    service.ask(
+        paper["id"],
+        "Use Codex",
+        answer_mode="codex",
+        codex_options={"enabled": True},
+    )
+
+    assert str(captured["cwd_name"]).startswith("open-alphaxiv-codex-")
+    assert captured["cwd_exists_during_run"] is True
+
+
 def test_codex_prompt_states_when_no_chunks_are_available() -> None:
     prompt = build_codex_paper_prompt(
         {"title": "Sparse paper", "arxiv_id": "2601.00001", "authors": ["Test Author"]},

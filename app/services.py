@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import textwrap
 import urllib.error
 import urllib.request
@@ -692,15 +693,27 @@ def codex_answer(
     codex_home = str(options.get("codex_home") or "")
     if codex_home:
         env["CODEX_HOME"] = codex_home
+    explicit_cwd = options.get("cwd")
     try:
-        result = subprocess.run(
-            command,
-            cwd=str(options.get("cwd") or Path.cwd()),
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            env=env,
-        )
+        if explicit_cwd:
+            result = subprocess.run(
+                command,
+                cwd=str(explicit_cwd),
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                env=env,
+            )
+        else:
+            with tempfile.TemporaryDirectory(prefix="open-alphaxiv-codex-") as codex_cwd:
+                result = subprocess.run(
+                    command,
+                    cwd=codex_cwd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_seconds,
+                    env=env,
+                )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"Codex paper chat timed out after {timeout_seconds} seconds.") from exc
     if result.returncode != 0:

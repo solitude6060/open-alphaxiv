@@ -25,6 +25,15 @@ if [[ ! -e "$codex_bin_dir/codex" ]]; then
   exit 1
 fi
 
+exec_help="$("$codex_bin_dir/codex" exec --help 2>&1 || true)"
+for required_flag in --ephemeral --sandbox --skip-git-repo-check; do
+  if ! grep -q -- "$required_flag" <<<"$exec_help"; then
+    echo "Codex CLI does not report required flag for paper chat: $required_flag"
+    echo "Upgrade Codex CLI or set OPEN_ALPHAXIV_HOST_CODEX_BIN to a compatible install."
+    exit 1
+  fi
+done
+
 if [[ ! -d "$codex_home" ]]; then
   echo "Codex home directory does not exist: $codex_home"
   echo "Run codex login on the host first, or set OPEN_ALPHAXIV_HOST_CODEX_HOME."

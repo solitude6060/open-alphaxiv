@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -30,9 +31,13 @@ def deterministic_arxiv_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture()
 def app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FastAPI:
+    async def immediate_to_thread(func: Callable[..., object], /, *args: object, **kwargs: object) -> object:
+        return func(*args, **kwargs)
+
     service.cache_clear()
     monkeypatch.setenv("OPEN_ALPHAXIV_DATABASE_PATH", str(tmp_path / "api.db"))
     monkeypatch.setenv("OPEN_ALPHAXIV_STORAGE_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr("app.main.asyncio.to_thread", immediate_to_thread)
     yield create_app()
     service.cache_clear()
 
