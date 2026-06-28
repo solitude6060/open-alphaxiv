@@ -66,7 +66,8 @@ async def test_codex_status_describes_local_connector_boundary(app: FastAPI) -> 
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] in {"ready", "not_configured"}
-    assert "chatgpt_login" in payload["auth_modes"]
+    assert "host_cli_login" in payload["auth_modes"]
+    assert "chatgpt_login" not in payload["auth_modes"]
     assert "local agent connector" in payload["integration_boundary"]
     assert "codex_agent_enabled" in payload
     assert "codex_chat_available" in payload
@@ -106,3 +107,23 @@ async def test_chat_messages_accepts_codex_answer_mode_over_http(
     assert payload["answer"] == "HTTP Codex answer [chunk:1]"
     assert payload["retrieval"]["provider"] == "codex"
     assert payload["retrieval"]["answer_mode"] == "codex"
+
+
+@pytest.mark.asyncio
+async def test_chat_messages_rejects_invalid_answer_mode_over_http(app: FastAPI) -> None:
+    async with asgi_client(app) as client:
+        paper_response = await client.post("/api/papers", json={"source": "https://arxiv.org/abs/2201.08239"})
+        assert paper_response.status_code == 200
+        paper_id = paper_response.json()["id"]
+
+        response = await client.post(
+            "/api/chat/messages",
+            json={
+                "paper_id": paper_id,
+                "query": "Summarize the contribution",
+                "answer_mode": "browser_oauth",
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "answer_mode must be 'mock' or 'codex'"

@@ -20,12 +20,15 @@ commands.
 | Codex status failure could block normal refresh. | Fetch providers and papers independently from Codex status; treat Codex status failure as unavailable Codex only. | `npm run build` |
 | Codex CLI flag compatibility was only manually verified. | Added `codex exec --help` checks for required paper-chat flags in `scripts/check-codex-docker.sh`. | `bash scripts/check-codex-docker.sh` |
 | Host Codex home mount is writable from the API container. | Documented that this is intentional because Codex may update local state under `CODEX_HOME`; recommended using a dedicated Codex home when host state isolation matters. | README review |
+| Codex subprocess non-timeout startup failures could bubble as HTTP 500. | Convert `OSError` from `subprocess.run()` into `RuntimeError` so the API handler returns the existing HTTP 400 error contract. | `tests/test_services.py` |
+| `auth_modes` exposed `chatgpt_login` and could imply browser OAuth. | Rename the status metadata to `host_cli_login`; assert `chatgpt_login` is absent. | `tests/test_api.py` |
+| Invalid `answer_mode` lacked an explicit HTTP contract test. | Added an ASGI HTTP test that invalid answer modes return HTTP 400 with the service error message. | `tests/test_api.py` |
 
 ## Verification
 
 - `env PYTHONPATH=.:.deps python3 -m pytest tests/test_api.py::test_chat_messages_accepts_codex_answer_mode_over_http -vv -s` -> 1 passed.
-- `env PYTHONPATH=.:.deps python3 -m pytest tests/test_api.py tests/test_services.py` -> 16 passed.
-- `env PYTHONPATH=.:.deps python3 -m pytest` -> 16 passed.
+- `env PYTHONPATH=.:.deps python3 -m pytest tests/test_api.py tests/test_services.py` -> 18 passed.
+- `env PYTHONPATH=.:.deps python3 -m pytest` -> 18 passed.
 - `npm run build` -> passed.
 - `bash scripts/check-codex-docker.sh` -> passed.
 - `OPEN_ALPHAXIV_HOST_NODE_PREFIX=/tmp OPEN_ALPHAXIV_HOST_CODEX_HOME=/tmp docker compose -f docker-compose.yml -f docker-compose.codex.yml config` -> passed.

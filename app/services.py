@@ -716,6 +716,8 @@ def codex_answer(
                 )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"Codex paper chat timed out after {timeout_seconds} seconds.") from exc
+    except OSError as exc:
+        raise RuntimeError(f"Codex paper chat could not start: {exc}") from exc
     if result.returncode != 0:
         stderr = clean_ws(result.stderr)[-500:]
         raise RuntimeError(f"Codex paper chat failed: {stderr or 'codex exec exited with an error'}")

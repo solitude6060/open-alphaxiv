@@ -169,6 +169,29 @@ def test_codex_nonzero_returncode_raises_runtime_error(
         )
 
 
+def test_codex_oserror_raises_runtime_error(
+    service: PaperService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paper = service.ingest_paper("2201.08239")
+
+    def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr("app.services.resolve_executable", lambda path: "/usr/local/bin/codex")
+    monkeypatch.setattr("app.services.codex_credentials_available", lambda options: True)
+    monkeypatch.setattr("app.services.subprocess.run", fake_run)
+
+    with pytest.raises(RuntimeError, match="could not start: permission denied"):
+        service.ask(
+            paper["id"],
+            "Use Codex",
+            answer_mode="codex",
+            codex_options={"enabled": True, "cwd": tmp_path},
+        )
+
+
 def test_codex_empty_stdout_raises_runtime_error(
     service: PaperService,
     tmp_path: Path,

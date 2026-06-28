@@ -114,7 +114,7 @@ def create_app() -> FastAPI:
             "codex_api_key_present": api_key_present,
             "codex_auth_json_configured": auth_json_configured,
             "codex_default_auth_json_configured": default_auth_json_configured,
-            "auth_modes": ["chatgpt_login", "api_key", "access_token"],
+            "auth_modes": ["host_cli_login", "api_key", "access_token"],
             "integration_boundary": (
                 "Paper chat can use Codex through local codex exec when the backend enables it. "
                 "This is a local agent connector, not a browser OAuth model-provider flow."
