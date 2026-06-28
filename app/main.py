@@ -3,7 +3,6 @@ from __future__ import annotations
 from functools import lru_cache
 import os
 from pathlib import Path
-import shutil
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Response
@@ -11,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .config import get_settings
-from .services import PaperService
+from .services import PaperService, codex_credentials_available, resolve_executable
 from .store import Store
 
 
@@ -48,6 +47,7 @@ class ChatAsk(BaseModel):
     query: str
     session_id: int | None = None
     selected_text: str = ""
+    answer_mode: str = "mock"
 
 
 @lru_cache(maxsize=1)
@@ -90,19 +90,33 @@ def create_app() -> FastAPI:
 
     @app.get("/api/codex/status")
     def codex_status() -> dict[str, Any]:
+        cli_path = resolve_executable(settings.codex_cli_path)
+        access_token_present = bool(os.environ.get("CODEX_ACCESS_TOKEN"))
+        api_key_present = bool(os.environ.get("CODEX_API_KEY"))
         auth_json_path = os.environ.get("CODEX_AUTH_JSON_PATH", "")
         auth_json_configured = bool(auth_json_path and Path(auth_json_path).exists())
-        access_token_present = bool(os.environ.get("CODEX_ACCESS_TOKEN"))
-        cli_path = shutil.which("codex")
+        default_auth_json = (
+            Path(settings.codex_home) / "auth.json"
+            if settings.codex_home
+            else Path.home() / ".codex" / "auth.json"
+        )
+        default_auth_json_configured = default_auth_json.exists()
+        credentials_available = codex_credentials_available(codex_options())
+        chat_available = bool(settings.codex_enabled and cli_path and credentials_available)
         return {
-            "status": "ready" if cli_path and (access_token_present or auth_json_configured) else "not_configured",
+            "status": "ready" if chat_available else "not_configured",
+            "codex_agent_enabled": settings.codex_enabled,
+            "codex_chat_available": chat_available,
             "codex_cli_available": bool(cli_path),
+            "codex_cli_path": cli_path or settings.codex_cli_path,
             "codex_access_token_present": access_token_present,
+            "codex_api_key_present": api_key_present,
             "codex_auth_json_configured": auth_json_configured,
+            "codex_default_auth_json_configured": default_auth_json_configured,
             "auth_modes": ["chatgpt_login", "api_key", "access_token"],
             "integration_boundary": (
-                "Codex ChatGPT sign-in authenticates local Codex clients. "
-                "It is not exposed as a generic browser OAuth flow for this paper chat app."
+                "Paper chat can use Codex through local codex exec when the backend enables it. "
+                "This is a local agent connector, not a browser OAuth model-provider flow."
             ),
         }
 
@@ -157,7 +171,17 @@ def create_app() -> FastAPI:
 
     @app.post("/api/chat/messages")
     def ask(payload: ChatAsk) -> dict[str, Any]:
-        return service().ask(payload.paper_id, payload.query, payload.session_id, payload.selected_text)
+        try:
+            return service().ask(
+                payload.paper_id,
+                payload.query,
+                payload.session_id,
+                payload.selected_text,
+                payload.answer_mode,
+                codex_options(),
+            )
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/chat/messages/{message_id}/retrieval")
     def retrieval(message_id: int) -> dict[str, Any]:
@@ -181,6 +205,19 @@ def create_app() -> FastAPI:
         return Response(service().export_markdown(paper_id), media_type="text/markdown")
 
     return app
+
+
+def codex_options() -> dict[str, Any]:
+    settings = get_settings()
+    return {
+        "enabled": settings.codex_enabled,
+        "cli_path": settings.codex_cli_path,
+        "model": settings.codex_model,
+        "timeout_seconds": settings.codex_timeout_seconds,
+        "sandbox": settings.codex_sandbox,
+        "codex_home": settings.codex_home,
+        "cwd": Path.cwd(),
+    }
 
 
 app = create_app()

@@ -27,5 +27,7 @@ def test_codex_status_describes_local_connector_boundary() -> None:
 
     assert payload["status"] in {"ready", "not_configured"}
     assert "chatgpt_login" in payload["auth_modes"]
-    assert "generic browser OAuth" in payload["integration_boundary"]
+    assert "local agent connector" in payload["integration_boundary"]
+    assert "codex_agent_enabled" in payload
+    assert "codex_chat_available" in payload
     assert "codex_access_token_present" in payload

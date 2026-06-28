@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -75,6 +76,49 @@ def test_chat_uses_selected_text_as_question_focus(service: PaperService) -> Non
     assert "Selected passage focus:" in answer["answer"]
     assert answer["retrieval"]["selected_text_preview"].startswith("This MVP1 conversion")
     assert answer["citations"]
+
+
+def test_chat_can_use_codex_answer_mode(service: PaperService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    paper = service.ingest_paper("2201.08239")
+    captured: dict[str, object] = {}
+
+    def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(returncode=0, stdout="Codex answer [chunk:1]", stderr="progress")
+
+    monkeypatch.setattr("app.services.resolve_executable", lambda path: "/usr/local/bin/codex")
+    monkeypatch.setattr("app.services.codex_credentials_available", lambda options: True)
+    monkeypatch.setattr("app.services.subprocess.run", fake_run)
+
+    answer = service.ask(
+        paper["id"],
+        "Explain the contribution",
+        selected_text="selected context",
+        answer_mode="codex",
+        codex_options={
+            "enabled": True,
+            "cli_path": "codex",
+            "timeout_seconds": 5,
+            "sandbox": "read-only",
+            "cwd": tmp_path,
+        },
+    )
+
+    command = captured["command"]
+    assert answer["answer"] == "Codex answer [chunk:1]"
+    assert answer["retrieval"]["provider"] == "codex"
+    assert answer["retrieval"]["answer_mode"] == "codex"
+    assert command[:2] == ["/usr/local/bin/codex", "exec"]
+    assert "--sandbox" in command
+    assert "read-only" in command
+
+
+def test_codex_answer_mode_requires_explicit_enablement(service: PaperService) -> None:
+    paper = service.ingest_paper("2201.08239")
+
+    with pytest.raises(ValueError, match="OPEN_ALPHAXIV_CODEX_ENABLED"):
+        service.ask(paper["id"], "Use Codex", answer_mode="codex", codex_options={"enabled": False})
 
 
 def test_bookmark_tags_and_export(service: PaperService) -> None:

@@ -69,6 +69,11 @@ type GraphEdge = {
 type ChatResult = {
   answer: string;
   citations: Array<{ chunk_id: number; section_path: string; score: number; text: string }>;
+  retrieval: {
+    provider: string;
+    model: string;
+    answer_mode: "mock" | "codex";
+  };
 };
 
 type Chunk = {
@@ -81,9 +86,14 @@ type Chunk = {
 
 type CodexStatus = {
   status: "ready" | "not_configured";
+  codex_agent_enabled: boolean;
+  codex_chat_available: boolean;
   codex_cli_available: boolean;
+  codex_cli_path: string;
   codex_access_token_present: boolean;
+  codex_api_key_present: boolean;
   codex_auth_json_configured: boolean;
+  codex_default_auth_json_configured: boolean;
   auth_modes: string[];
   integration_boundary: string;
 };
@@ -113,6 +123,7 @@ function App() {
   const [selectedPaperId, setSelectedPaperId] = useState<number | null>(null);
   const [source, setSource] = useState("https://arxiv.org/abs/2201.08239");
   const [query, setQuery] = useState("What is the core contribution?");
+  const [answerMode, setAnswerMode] = useState<"mock" | "codex">("mock");
   const [selectedText, setSelectedText] = useState("");
   const [chunks, setChunks] = useState<Chunk[]>([]);
   const [chatResult, setChatResult] = useState<ChatResult | null>(null);
@@ -193,7 +204,12 @@ function App() {
     setStatus("Retrieving cited context");
     const result = await request<ChatResult>("/api/chat/messages", {
       method: "POST",
-      body: JSON.stringify({ paper_id: selectedPaper.id, query, selected_text: selectedText })
+      body: JSON.stringify({
+        paper_id: selectedPaper.id,
+        query,
+        selected_text: selectedText,
+        answer_mode: answerMode
+      })
     });
     setChatResult(result);
     setStatus("Answer generated");
@@ -268,7 +284,7 @@ function App() {
         </form>
         <div className="topbar-actions">
           <span className={codexStatus?.status === "ready" ? "health ready" : "health"}>
-            <KeyRound size={15} /> Codex {codexStatus?.status === "ready" ? "ready" : "local"}
+            <KeyRound size={15} /> Codex {codexStatus?.codex_chat_available ? "ready" : "local"}
           </span>
           <span className="health"><HeartPulse size={15} /> {status}</span>
         </div>
@@ -358,8 +374,28 @@ function App() {
               <section className="tool-section">
                 <div className="tool-heading">
                   <h2><Sparkles size={18} /> Assistant</h2>
-                  <span>{chunks.length} chunks</span>
+                  <span>{answerMode === "codex" ? "codex" : `${chunks.length} chunks`}</span>
                 </div>
+                <div className="mode-switch" aria-label="Answer mode">
+                  <button
+                    className={answerMode === "mock" ? "active" : ""}
+                    onClick={() => setAnswerMode("mock")}
+                  >
+                    Mock
+                  </button>
+                  <button
+                    className={answerMode === "codex" ? "active" : ""}
+                    onClick={() => setAnswerMode("codex")}
+                    disabled={!codexStatus?.codex_chat_available}
+                  >
+                    Codex
+                  </button>
+                </div>
+                {answerMode === "codex" && !codexStatus?.codex_chat_available ? (
+                  <p className="codex-boundary">
+                    Enable the local Codex agent in the backend before using Codex for paper chat.
+                  </p>
+                ) : null}
                 {selectedText ? (
                   <div className="selected-quote">
                     <Quote size={15} />
@@ -373,6 +409,9 @@ function App() {
                 </button>
                 {chatResult ? (
                   <div className="answer">
+                    <div className="answer-meta">
+                      {chatResult.retrieval.provider} / {chatResult.retrieval.model}
+                    </div>
                     <p>{chatResult.answer}</p>
                     {chatResult.citations.map((citation) => (
                       <blockquote key={citation.chunk_id}>
@@ -445,10 +484,15 @@ function App() {
                   <span>{codexStatus?.status || "unknown"}</span>
                 </div>
                 <div className="codex-grid">
+                  <StatusLine label="Agent enabled" value={codexStatus?.codex_agent_enabled} />
+                  <StatusLine label="Paper chat" value={codexStatus?.codex_chat_available} />
                   <StatusLine label="CLI" value={codexStatus?.codex_cli_available} />
                   <StatusLine label="Access token" value={codexStatus?.codex_access_token_present} />
+                  <StatusLine label="API key" value={codexStatus?.codex_api_key_present} />
                   <StatusLine label="Auth JSON" value={codexStatus?.codex_auth_json_configured} />
+                  <StatusLine label="Default auth" value={codexStatus?.codex_default_auth_json_configured} />
                 </div>
+                <p className="codex-path">{codexStatus?.codex_cli_path}</p>
                 <p className="codex-boundary">{codexStatus?.integration_boundary}</p>
                 <div className="auth-modes">
                   {codexStatus?.auth_modes.map((mode) => <span key={mode}>{mode}</span>)}

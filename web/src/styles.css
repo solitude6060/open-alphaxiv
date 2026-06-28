@@ -621,6 +621,16 @@ textarea {
   font-size: 14px;
 }
 
+.answer-meta {
+  width: fit-content;
+  border-radius: 999px;
+  padding: 5px 8px;
+  background: #edf3f5;
+  color: #526870;
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .answer > p {
   margin: 0;
   border: 1px solid #e3eaed;
@@ -653,6 +663,35 @@ blockquote p {
   color: #526870;
   font-size: 13px;
   font-weight: 800;
+}
+
+.mode-switch {
+  height: 38px;
+  border: 1px solid #d6e0e3;
+  border-radius: 7px;
+  padding: 3px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px;
+  background: #f8fbfc;
+}
+
+.mode-switch button {
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #526870;
+  font-weight: 800;
+}
+
+.mode-switch button.active {
+  background: #2d7d6f;
+  color: #fff;
+}
+
+.mode-switch button:disabled {
+  cursor: not-allowed;
+  color: #9aaab0;
 }
 
 .provider-list,
@@ -740,6 +779,18 @@ blockquote p {
   color: #405157;
   line-height: 1.5;
   font-size: 13px;
+}
+
+.codex-path {
+  margin: 0;
+  border: 1px solid #dbe3e6;
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: #fff;
+  color: #526870;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .auth-modes {

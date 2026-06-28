@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import re
+import shutil
+import subprocess
 import textwrap
 import urllib.error
 import urllib.request
@@ -414,6 +417,8 @@ class PaperService:
         query: str,
         session_id: int | None = None,
         selected_text: str = "",
+        answer_mode: str = "mock",
+        codex_options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if session_id is None:
             session_id = self.create_chat_session(paper_id)["id"]
@@ -424,14 +429,27 @@ class PaperService:
             (session_id, query, utcnow()),
         )
         ranked = self.retrieve(paper_id, retrieval_query)
-        answer = mock_answer(query, ranked, selected_text)
+        provider = "mock"
+        model = "mvp1-cited-extractive"
+        run_metadata: dict[str, Any] = {}
+        if answer_mode == "codex":
+            paper = self.get_paper(paper_id)
+            answer, run_metadata = codex_answer(paper, query, ranked, selected_text, codex_options or {})
+            provider = "codex"
+            model = run_metadata.get("model") or "codex-local-agent"
+        elif answer_mode == "mock":
+            answer = mock_answer(query, ranked, selected_text)
+        else:
+            raise ValueError("answer_mode must be 'mock' or 'codex'")
         metadata = {
-            "provider": "mock",
-            "model": "mvp1-cited-extractive",
+            "provider": provider,
+            "model": model,
+            "answer_mode": answer_mode,
             "retrieved_chunk_ids": [item["id"] for item in ranked],
             "retrieval": ranked,
             "selected_text_preview": selected_text[:240],
             "user_message_id": user_message_id,
+            **run_metadata,
         }
         assistant_message_id = self.store.execute(
             """
@@ -635,6 +653,128 @@ def mock_answer(query: str, chunks: list[dict[str, Any]], selected_text: str = "
         f"{focus}Answer based on local retrieved context: {excerpt}. "
         f"This is an MVP1 extractive response to: '{query}'. Sources: {citations}."
     )
+
+
+def codex_answer(
+    paper: dict[str, Any],
+    query: str,
+    chunks: list[dict[str, Any]],
+    selected_text: str,
+    options: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    if not options.get("enabled"):
+        raise ValueError("Codex paper chat is disabled. Set OPEN_ALPHAXIV_CODEX_ENABLED=true.")
+    cli_path = str(options.get("cli_path") or "codex")
+    resolved_cli = resolve_executable(cli_path)
+    if not resolved_cli:
+        raise ValueError(f"Codex CLI not found: {cli_path}")
+    if not codex_credentials_available(options):
+        raise ValueError("Codex credentials were not detected for this backend process.")
+
+    timeout_seconds = int(options.get("timeout_seconds") or 180)
+    sandbox = str(options.get("sandbox") or "read-only")
+    if sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
+        sandbox = "read-only"
+    model = str(options.get("model") or "")
+    prompt = build_codex_paper_prompt(paper, query, chunks, selected_text)
+    command = [
+        resolved_cli,
+        "exec",
+        "--ephemeral",
+        "--sandbox",
+        sandbox,
+        "--ask-for-approval",
+        "never",
+    ]
+    if model:
+        command.extend(["--model", model])
+    command.append(prompt)
+    env = os.environ.copy()
+    codex_home = str(options.get("codex_home") or "")
+    if codex_home:
+        env["CODEX_HOME"] = codex_home
+    try:
+        result = subprocess.run(
+            command,
+            cwd=str(options.get("cwd") or Path.cwd()),
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"Codex paper chat timed out after {timeout_seconds} seconds.") from exc
+    if result.returncode != 0:
+        stderr = clean_ws(result.stderr)[-500:]
+        raise RuntimeError(f"Codex paper chat failed: {stderr or 'codex exec exited with an error'}")
+    answer = result.stdout.strip()
+    if not answer:
+        raise RuntimeError("Codex paper chat returned an empty answer.")
+    return answer, {
+        "codex_sandbox": sandbox,
+        "codex_cli_path": resolved_cli,
+        "codex_stderr_preview": clean_ws(result.stderr)[-500:],
+        "model": model or "codex-local-agent",
+    }
+
+
+def build_codex_paper_prompt(
+    paper: dict[str, Any],
+    query: str,
+    chunks: list[dict[str, Any]],
+    selected_text: str,
+) -> str:
+    chunk_lines = []
+    for chunk in chunks[:5]:
+        text = clean_ws(chunk["text"])[:1400]
+        chunk_lines.append(
+            f"[chunk:{chunk['id']}] section={chunk['section_path']} score={chunk['score']}\n{text}"
+        )
+    selected = clean_ws(selected_text)[:1800] or "(none)"
+    return textwrap.dedent(
+        f"""
+        You are answering a research paper question inside Open AlphaXiv Local.
+
+        Constraints:
+        - Use only the paper metadata, selected passage, and retrieved chunks below.
+        - Do not edit files, run shell commands, browse the web, or ask for more context.
+        - If the evidence is insufficient, say exactly what is missing.
+        - Cite evidence with [chunk:<id>] references.
+        - Keep the answer concise and technical.
+
+        Paper:
+        Title: {paper['title']}
+        arXiv: {paper.get('arxiv_id') or paper.get('source_id')}
+        Authors: {', '.join(paper.get('authors', []))}
+
+        Selected passage:
+        {selected}
+
+        Question:
+        {query}
+
+        Retrieved chunks:
+        {chr(10).join(chunk_lines)}
+        """
+    ).strip()
+
+
+def resolve_executable(path: str) -> str:
+    if "/" in path:
+        return path if Path(path).exists() else ""
+    return shutil.which(path) or ""
+
+
+def codex_credentials_available(options: dict[str, Any]) -> bool:
+    if os.environ.get("CODEX_ACCESS_TOKEN") or os.environ.get("CODEX_API_KEY"):
+        return True
+    auth_json_path = os.environ.get("CODEX_AUTH_JSON_PATH")
+    if auth_json_path and Path(auth_json_path).exists():
+        return True
+    codex_home = str(options.get("codex_home") or os.environ.get("CODEX_HOME") or "")
+    if codex_home and (Path(codex_home) / "auth.json").exists():
+        return True
+    return (Path.home() / ".codex" / "auth.json").exists()
 
 
 def redact_provider(row: dict[str, Any]) -> dict[str, Any]:

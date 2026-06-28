@@ -221,6 +221,9 @@ OpenAI Codex official authentication boundary:
 - The Codex SDK and app server are appropriate for optional local agent
   automation around software-development tasks. They are not the default model
   call path for paper question answering.
+- Codex non-interactive mode (`codex exec`) can be used for local, scripted
+  agent tasks. It prints the final answer to stdout, can run with
+  `--ephemeral`, and supports explicit sandbox and approval settings.
 
 Product boundary:
 
@@ -234,6 +237,9 @@ Product boundary:
   - Expose Codex local connector status separately from model-provider health so
     users can distinguish "Codex CLI authenticated" from "paper chat model
     provider configured."
+  - Allow paper chat to use Codex only through an explicit local-agent mode that
+    calls `codex exec` from the backend with read-only sandboxing. This mode
+    must remain opt-in because it starts an agent process from an HTTP request.
 
 ## Requirements Derived From Survey
 
@@ -246,6 +252,8 @@ MVP must include:
   on the right.
 - Selection-aware paper chat that includes highlighted reader text in retrieval
   metadata and the answer focus.
+- Optional Codex answer mode for paper chat, using retrieved chunks as the
+  bounded context passed to the local Codex agent.
 - PDF download, conversion, cleanup, chunking, and metadata extraction.
 - Graph-backed paper question answering.
 - OpenAI-compatible LLM provider configuration.
