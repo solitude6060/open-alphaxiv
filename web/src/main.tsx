@@ -1,6 +1,23 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Bookmark, Download, GitBranch, HeartPulse, MessageSquare, Plus, Search, Settings, Tags } from "lucide-react";
+import {
+  ArrowRight,
+  BookOpen,
+  Bookmark,
+  Database,
+  Download,
+  FileSearch,
+  GitBranch,
+  HeartPulse,
+  KeyRound,
+  MessageSquare,
+  Network,
+  Plus,
+  Search,
+  Settings,
+  ShieldCheck,
+  Tags
+} from "lucide-react";
 import "./styles.css";
 
 const API_URL = import.meta.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -65,6 +82,10 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 
 function App() {
+  if (window.location.pathname === "/login") {
+    return <LoginPage />;
+  }
+
   const [providers, setProviders] = useState<Provider[]>([]);
   const [papers, setPapers] = useState<Paper[]>([]);
   const [selectedPaperId, setSelectedPaperId] = useState<number | null>(null);
@@ -302,6 +323,84 @@ function App() {
   );
 }
 
+function LoginPage() {
+  return (
+    <main className="login-page">
+      <section className="login-hero" aria-label="Open AlphaXiv local entry">
+        <div className="login-copy">
+          <div className="login-mark">
+            <GitBranch size={22} />
+            <span>Open AlphaXiv Local</span>
+          </div>
+          <h1>Local research workspace</h1>
+          <p>
+            Read papers, ask cited questions, and inspect related work from one local Docker stack.
+          </p>
+          <div className="login-actions">
+            <a className="login-primary" href="/">
+              Enter workspace <ArrowRight size={17} />
+            </a>
+            <a className="login-secondary" href={`${API_URL}/docs`}>
+              API docs
+            </a>
+          </div>
+        </div>
+
+        <div className="login-console" aria-label="Local service status">
+          <div className="console-bar">
+            <span />
+            <span />
+            <span />
+            <strong>local stack</strong>
+          </div>
+          <div className="service-row ready">
+            <ShieldCheck size={18} />
+            <div>
+              <strong>API</strong>
+              <span>http://localhost:8000</span>
+            </div>
+            <em>ready</em>
+          </div>
+          <div className="service-row ready">
+            <BookOpen size={18} />
+            <div>
+              <strong>Workspace</strong>
+              <span>http://localhost:3100</span>
+            </div>
+            <em>ready</em>
+          </div>
+          <div className="service-row planned">
+            <KeyRound size={18} />
+            <div>
+              <strong>GitHub OAuth</strong>
+              <span>planned connector</span>
+            </div>
+            <em>not wired</em>
+          </div>
+        </div>
+      </section>
+
+      <section className="login-capabilities" aria-label="Local capabilities">
+        <article>
+          <FileSearch size={20} />
+          <strong>arXiv ingest</strong>
+          <span>Metadata, Markdown, chunks, and citations.</span>
+        </article>
+        <article>
+          <Network size={20} />
+          <strong>Literature graph</strong>
+          <span>Related, prior, and derivative views.</span>
+        </article>
+        <article>
+          <Database size={20} />
+          <strong>Local data</strong>
+          <span>SQLite MVP state with Docker storage.</span>
+        </article>
+      </section>
+    </main>
+  );
+}
+
 function Graph({ graph }: { graph: { nodes: GraphNode[]; edges: GraphEdge[] } | null }) {
   if (!graph) return <div className="graph-empty">No graph loaded.</div>;
   const nodes = graph.nodes.slice(0, 28);
@@ -353,4 +452,3 @@ function Graph({ graph }: { graph: { nodes: GraphNode[]; edges: GraphEdge[] } | 
 }
 
 createRoot(document.getElementById("root")!).render(<App />);
-
