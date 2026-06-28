@@ -1,0 +1,15 @@
+.git
+.agents
+.codex
+.deps
+.pytest_cache
+__pycache__
+*.pyc
+data
+*.db
+web/node_modules
+web/dist
+node_modules
+dist
+.env
+
