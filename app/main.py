@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import asyncio
+from asyncio import to_thread
 from functools import lru_cache
 import os
 from pathlib import Path
@@ -48,6 +48,7 @@ class ChatAsk(BaseModel):
     query: str
     session_id: int | None = None
     selected_text: str = ""
+    selected_image: dict[str, Any] | None = None
     answer_mode: str = "mock"
 
 
@@ -139,7 +140,7 @@ def create_app() -> FastAPI:
     @app.post("/api/papers")
     async def create_paper(payload: PaperCreate) -> dict[str, Any]:
         try:
-            return await asyncio.to_thread(service().ingest_paper, payload.source)
+            return await to_thread(service().ingest_paper, payload.source)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -158,6 +159,25 @@ def create_app() -> FastAPI:
     def chunks(paper_id: int) -> list[dict[str, Any]]:
         return service().chunks(paper_id)
 
+    @app.get("/api/papers/{paper_id}/fulltext")
+    async def paper_fulltext(paper_id: int) -> dict[str, Any]:
+        try:
+            return service().paper_text(paper_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/papers/{paper_id}/pages")
+    async def paper_pages(paper_id: int) -> list[dict[str, Any]]:
+        return service().paper_pages(paper_id)
+
+    @app.get("/api/papers/{paper_id}/pages/{page_number}.png")
+    async def paper_page_image(paper_id: int, page_number: int) -> Response:
+        try:
+            path = service().paper_page_image_path(paper_id, page_number)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return Response(content=path.read_bytes(), media_type="image/png")
+
     @app.post("/api/papers/{paper_id}/bookmark")
     def bookmark(paper_id: int, payload: BookmarkUpdate) -> dict[str, Any]:
         return service().update_bookmark(paper_id, payload.bookmarked)
@@ -173,14 +193,15 @@ def create_app() -> FastAPI:
     @app.post("/api/chat/messages")
     async def ask(payload: ChatAsk) -> dict[str, Any]:
         try:
-            return await asyncio.to_thread(
+            return await to_thread(
                 service().ask,
-                payload.paper_id,
-                payload.query,
-                payload.session_id,
-                payload.selected_text,
-                payload.answer_mode,
-                codex_options(),
+                paper_id=payload.paper_id,
+                query=payload.query,
+                session_id=payload.session_id,
+                selected_text=payload.selected_text,
+                selected_image=payload.selected_image,
+                answer_mode=payload.answer_mode,
+                codex_options=codex_options(),
             )
         except (ValueError, RuntimeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -107,8 +107,8 @@ Fields:
 
 - `id`
 - `paper_id`
-- `artifact_type`: `pdf`, `markdown`, `summary`, `notes`, `graph_snapshot`,
-  `export`
+- `artifact_type`: `pdf`, `pdf_text`, `page_image`, `markdown`, `summary`,
+  `notes`, `graph_snapshot`, `export`
 - `storage_uri`
 - `content_hash`
 - `metadata_json`
@@ -238,6 +238,9 @@ Fields:
   - Query: search, tag, status, bookmarked, source, date range.
 - `GET /api/papers/{paper_id}`
 - `GET /api/papers/{paper_id}/chunks`
+- `GET /api/papers/{paper_id}/fulltext`
+- `GET /api/papers/{paper_id}/pages`
+- `GET /api/papers/{paper_id}/pages/{page_number}.png`
 - `POST /api/papers/{paper_id}/retry`
 - `POST /api/papers/{paper_id}/bookmark`
 - `POST /api/papers/{paper_id}/tags`
@@ -440,4 +443,3 @@ MVP implementation should include:
 - Copilot and Codex integrations have subscription and availability limits.
 - Some OpenAI-compatible endpoints implement only Chat Completions, not
   Responses.
-

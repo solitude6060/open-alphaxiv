@@ -33,6 +33,40 @@ def service(tmp_path: Path) -> PaperService:
     return PaperService(Store(tmp_path / "test.db"), tmp_path / "data")
 
 
+@pytest.fixture(autouse=True)
+def deterministic_pdf_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
+    def pdf_bytes(url: str) -> bytes | None:
+        return b"%PDF-1.4 deterministic fixture"
+
+    def pdf_text(path: Path) -> str:
+        method_text = " ".join(
+            [
+                "The model uses scaled dot product attention, multi head attention, feed forward layers,",
+                "residual connections, layer normalization, positional encoding, label smoothing,",
+                "autoregressive decoding, teacher forcing, beam search, and parallelizable sequence modeling.",
+            ]
+            * 12
+        )
+        return (
+            "Introduction\n"
+            "This paper introduces a transformer architecture with attention and positional encoding.\n\n"
+            "Method\n"
+            f"{method_text}\n\n"
+            "Experiments\n"
+            "Machine translation experiments compare BLEU scores against recurrent baselines."
+        )
+
+    def page_images(pdf_path: Path, output_dir: Path, max_pages: int = 12) -> list[Path]:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        page = output_dir / "page-001.png"
+        page.write_bytes(b"png")
+        return [page]
+
+    monkeypatch.setattr("app.services.fetch_binary", pdf_bytes)
+    monkeypatch.setattr("app.services.extract_pdf_text", pdf_text)
+    monkeypatch.setattr("app.services.render_pdf_page_images", page_images)
+
+
 def test_normalize_arxiv_id_from_url() -> None:
     assert normalize_arxiv_id("https://arxiv.org/abs/2201.08239v2") == "2201.08239"
 
@@ -43,7 +77,14 @@ def test_ingest_paper_creates_ready_chunks_and_graph(service: PaperService) -> N
     assert paper["status"] == "ready"
     assert paper["arxiv_id"] == "2201.08239"
     assert paper["chunk_count"] >= 3
+    assert paper["full_text_available"] is True
+    assert paper["page_image_count"] == 1
     assert len(service.chunks(paper["id"])) >= 3
+    full_text = service.paper_text(paper["id"])
+    assert "scaled dot product attention" in full_text["text"]
+    pages = service.paper_pages(paper["id"])
+    assert pages[0]["page_number"] == 1
+    assert pages[0]["image_url"].endswith("/api/papers/1/pages/1.png")
     graph = service.literature_graph(paper["id"])
     assert len(graph["nodes"]) >= 20
     assert graph["edges"]
@@ -96,6 +137,7 @@ def test_chat_can_use_codex_answer_mode(service: PaperService, tmp_path: Path, m
         paper["id"],
         "Explain the contribution",
         selected_text="selected context",
+        selected_image={"page": 1, "x": 10, "y": 12, "width": 40, "height": 20},
         answer_mode="codex",
         codex_options={
             "enabled": True,
@@ -107,9 +149,15 @@ def test_chat_can_use_codex_answer_mode(service: PaperService, tmp_path: Path, m
     )
 
     command = captured["command"]
+    prompt = command[-1]
     assert answer["answer"] == "Codex answer [chunk:1]"
     assert answer["retrieval"]["provider"] == "codex"
     assert answer["retrieval"]["answer_mode"] == "codex"
+    assert answer["retrieval"]["context_strategy"] == "full_text"
+    assert "Paper context:" in prompt
+    assert "scaled dot product attention" in prompt
+    assert "Selected image region:" in prompt
+    assert "Retrieved chunks:" not in prompt
     assert command[:2] == ["/usr/local/bin/codex", "exec"]
     assert "--sandbox" in command
     assert "read-only" in command
@@ -121,6 +169,19 @@ def test_codex_answer_mode_requires_explicit_enablement(service: PaperService) -
 
     with pytest.raises(ValueError, match="OPEN_ALPHAXIV_CODEX_ENABLED"):
         service.ask(paper["id"], "Use Codex", answer_mode="codex", codex_options={"enabled": False})
+
+
+def test_codex_prompt_truncates_long_paper_context() -> None:
+    prompt = build_codex_paper_prompt(
+        {"title": "Long paper", "arxiv_id": "2601.00001", "authors": ["Test Author"]},
+        "What can we infer?",
+        "word " * 50_000,
+        "",
+        None,
+    )
+
+    assert "Paper context was truncated" in prompt
+    assert len(prompt) < 90_000
 
 
 def test_codex_timeout_raises_runtime_error(
@@ -243,16 +304,17 @@ def test_codex_answer_uses_isolated_default_cwd(
     assert captured["cwd_exists_during_run"] is True
 
 
-def test_codex_prompt_states_when_no_chunks_are_available() -> None:
+def test_codex_prompt_states_when_no_text_is_available() -> None:
     prompt = build_codex_paper_prompt(
         {"title": "Sparse paper", "arxiv_id": "2601.00001", "authors": ["Test Author"]},
         "What can we infer?",
-        [],
         "",
+        "",
+        None,
     )
 
-    assert "Retrieved chunks:" in prompt
-    assert "(No retrieved chunks available for this paper.)" in prompt
+    assert "Paper context:" in prompt
+    assert "(No extracted paper text is available.)" in prompt
 
 
 def test_bookmark_tags_and_export(service: PaperService) -> None:
