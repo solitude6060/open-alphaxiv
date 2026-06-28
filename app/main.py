@@ -74,7 +74,7 @@ def create_app() -> FastAPI:
     )
 
     @app.get("/")
-    def root() -> dict[str, Any]:
+    async def root() -> dict[str, Any]:
         return {
             "name": "Open AlphaXiv Local",
             "status": "ok",
@@ -89,7 +89,7 @@ def create_app() -> FastAPI:
         return {"status": "ok", "version": "0.1.0-mvp1", "storage_dir": str(settings.storage_dir)}
 
     @app.get("/api/codex/status")
-    def codex_status() -> dict[str, Any]:
+    async def codex_status() -> dict[str, Any]:
         cli_path = resolve_executable(settings.codex_cli_path)
         access_token_present = bool(os.environ.get("CODEX_ACCESS_TOKEN"))
         api_key_present = bool(os.environ.get("CODEX_API_KEY"))
@@ -136,7 +136,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/api/papers")
-    def create_paper(payload: PaperCreate) -> dict[str, Any]:
+    async def create_paper(payload: PaperCreate) -> dict[str, Any]:
         try:
             return service().ingest_paper(payload.source)
         except ValueError as exc:
@@ -170,7 +170,7 @@ def create_app() -> FastAPI:
         return service().create_chat_session(payload.paper_id, payload.title)
 
     @app.post("/api/chat/messages")
-    def ask(payload: ChatAsk) -> dict[str, Any]:
+    async def ask(payload: ChatAsk) -> dict[str, Any]:
         try:
             return service().ask(
                 payload.paper_id,

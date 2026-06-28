@@ -729,6 +729,8 @@ def build_codex_paper_prompt(
         chunk_lines.append(
             f"[chunk:{chunk['id']}] section={chunk['section_path']} score={chunk['score']}\n{text}"
         )
+    if not chunk_lines:
+        chunk_lines.append("(No retrieved chunks available for this paper.)")
     selected = clean_ws(selected_text)[:1800] or "(none)"
     return textwrap.dedent(
         f"""

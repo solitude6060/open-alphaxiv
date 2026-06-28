@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 
 import pytest
 
-from app.services import PaperService, normalize_arxiv_id
+from app.services import PaperService, build_codex_paper_prompt, normalize_arxiv_id
 from app.store import Store
 
 
@@ -120,6 +121,87 @@ def test_codex_answer_mode_requires_explicit_enablement(service: PaperService) -
 
     with pytest.raises(ValueError, match="OPEN_ALPHAXIV_CODEX_ENABLED"):
         service.ask(paper["id"], "Use Codex", answer_mode="codex", codex_options={"enabled": False})
+
+
+def test_codex_timeout_raises_runtime_error(
+    service: PaperService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paper = service.ingest_paper("2201.08239")
+
+    def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        raise subprocess.TimeoutExpired(cmd=command, timeout=5)
+
+    monkeypatch.setattr("app.services.resolve_executable", lambda path: "/usr/local/bin/codex")
+    monkeypatch.setattr("app.services.codex_credentials_available", lambda options: True)
+    monkeypatch.setattr("app.services.subprocess.run", fake_run)
+
+    with pytest.raises(RuntimeError, match="timed out after 5 seconds"):
+        service.ask(
+            paper["id"],
+            "Use Codex",
+            answer_mode="codex",
+            codex_options={"enabled": True, "timeout_seconds": 5, "cwd": tmp_path},
+        )
+
+
+def test_codex_nonzero_returncode_raises_runtime_error(
+    service: PaperService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paper = service.ingest_paper("2201.08239")
+
+    def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(returncode=1, stdout="", stderr="codex auth failed")
+
+    monkeypatch.setattr("app.services.resolve_executable", lambda path: "/usr/local/bin/codex")
+    monkeypatch.setattr("app.services.codex_credentials_available", lambda options: True)
+    monkeypatch.setattr("app.services.subprocess.run", fake_run)
+
+    with pytest.raises(RuntimeError, match="codex auth failed"):
+        service.ask(
+            paper["id"],
+            "Use Codex",
+            answer_mode="codex",
+            codex_options={"enabled": True, "cwd": tmp_path},
+        )
+
+
+def test_codex_empty_stdout_raises_runtime_error(
+    service: PaperService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paper = service.ingest_paper("2201.08239")
+
+    def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("app.services.resolve_executable", lambda path: "/usr/local/bin/codex")
+    monkeypatch.setattr("app.services.codex_credentials_available", lambda options: True)
+    monkeypatch.setattr("app.services.subprocess.run", fake_run)
+
+    with pytest.raises(RuntimeError, match="empty answer"):
+        service.ask(
+            paper["id"],
+            "Use Codex",
+            answer_mode="codex",
+            codex_options={"enabled": True, "cwd": tmp_path},
+        )
+
+
+def test_codex_prompt_states_when_no_chunks_are_available() -> None:
+    prompt = build_codex_paper_prompt(
+        {"title": "Sparse paper", "arxiv_id": "2601.00001", "authors": ["Test Author"]},
+        "What can we infer?",
+        [],
+        "",
+    )
+
+    assert "Retrieved chunks:" in prompt
+    assert "(No retrieved chunks available for this paper.)" in prompt
 
 
 def test_bookmark_tags_and_export(service: PaperService) -> None:

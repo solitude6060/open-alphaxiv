@@ -140,11 +140,16 @@ function App() {
   );
 
   async function refresh() {
-    const [providerRows, paperRows, codex] = await Promise.all([
+    const [providerRows, paperRows] = await Promise.all([
       request<Provider[]>("/api/providers"),
-      request<Paper[]>("/api/papers"),
-      request<CodexStatus>("/api/codex/status")
+      request<Paper[]>("/api/papers")
     ]);
+    let codex: CodexStatus | null = null;
+    try {
+      codex = await request<CodexStatus>("/api/codex/status");
+    } catch {
+      codex = null;
+    }
     setProviders(providerRows);
     setPapers(paperRows);
     setCodexStatus(codex);
