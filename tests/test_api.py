@@ -555,6 +555,65 @@ async def test_grounding_snapshot_rejects_unknown_project_over_http(app: FastAPI
 
 
 @pytest.mark.asyncio
+async def test_research_dashboard_and_search_over_http(app: FastAPI) -> None:
+    async with asgi_client(app) as client:
+        project_response = await client.post(
+            "/api/research/projects",
+            json={
+                "title": "HTTP dashboard project",
+                "goal": "Track retrieval quality.",
+                "current_state": "Collecting evidence.",
+            },
+        )
+        project = project_response.json()
+        await client.post(
+            "/api/research/questions",
+            json={"project_id": project["id"], "question": "Does retrieval quality improve?"},
+        )
+        await client.post(
+            "/api/research/notes",
+            json={
+                "project_id": project["id"],
+                "title": "Retrieval note",
+                "body_markdown": "Retrieval quality improved after context cleanup.",
+            },
+        )
+        await client.post(
+            "/api/experiments/runs",
+            json={
+                "project_id": project["id"],
+                "title": "Retrieval experiment",
+                "summary": "Context cleanup improved retrieval quality.",
+            },
+        )
+        discussion_response = await client.post(
+            "/api/research/discussions",
+            json={"project_id": project["id"], "title": "Retrieval discussion"},
+        )
+        await client.post(
+            f"/api/research/discussions/{discussion_response.json()['id']}/messages",
+            json={"content": "Discuss retrieval quality."},
+        )
+        await client.post(f"/api/research/projects/{project['id']}/grounding-snapshots", json={"title": "Retrieval snapshot"})
+
+        dashboard_response = await client.get("/api/research/dashboard")
+        search_response = await client.get("/api/research/search?q=retrieval")
+        scoped_response = await client.get(f"/api/research/search?q=retrieval&project_id={project['id']}")
+        missing_scope_response = await client.get("/api/research/search?q=retrieval&project_id=999")
+
+    assert dashboard_response.status_code == 200
+    assert dashboard_response.json()["counts"]["projects"] == 1
+    assert dashboard_response.json()["active_projects"][0]["title"] == "HTTP dashboard project"
+    assert search_response.status_code == 200
+    assert any(result["type"] == "research_note" for result in search_response.json())
+    assert any(result["type"] == "research_discussion_message" for result in search_response.json())
+    assert scoped_response.status_code == 200
+    assert all(result["project_id"] == project["id"] for result in scoped_response.json())
+    assert missing_scope_response.status_code == 404
+    assert missing_scope_response.json()["detail"] == "research project not found"
+
+
+@pytest.mark.asyncio
 async def test_chat_messages_rejects_invalid_answer_mode_over_http(app: FastAPI) -> None:
     async with asgi_client(app) as client:
         paper_response = await client.post("/api/papers", json={"source": "https://arxiv.org/abs/2201.08239"})

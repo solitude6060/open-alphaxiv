@@ -140,6 +140,39 @@ def clean_ws(text: str) -> str:
     return re.sub(r"\s+", " ", text.replace("&amp;", "&")).strip()
 
 
+def search_snippet(*values: Any, query: str = "") -> str:
+    texts = [clean_ws(str(value or "")) for value in values if clean_ws(str(value or ""))]
+    if not texts:
+        return ""
+    needle = query.lower()
+    for text in texts:
+        lower = text.lower()
+        if needle and needle in lower:
+            start = max(0, lower.find(needle) - 80)
+            end = min(len(text), start + 220)
+            prefix = "..." if start else ""
+            suffix = "..." if end < len(text) else ""
+            return f"{prefix}{text[start:end]}{suffix}"
+    return texts[0][:220]
+
+
+def research_search_result(
+    result_type: str,
+    row: dict[str, Any],
+    title: str,
+    snippet: str,
+    created_at: str,
+) -> dict[str, Any]:
+    return {
+        "type": result_type,
+        "id": row["id"],
+        "project_id": row.get("project_id") or row["id"],
+        "title": title,
+        "snippet": snippet,
+        "created_at": created_at,
+    }
+
+
 def slugify(value: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
     return slug or "research-project"
@@ -2024,6 +2057,149 @@ class PaperService:
         if not row:
             raise KeyError("grounding snapshot not found")
         return grounding_snapshot_row(row)
+
+    def research_dashboard(self) -> dict[str, Any]:
+        counts = {
+            "projects": self.store.query_one("SELECT COUNT(*) AS count FROM research_projects")["count"],
+            "questions": self.store.query_one("SELECT COUNT(*) AS count FROM research_questions")["count"],
+            "notes": self.store.query_one("SELECT COUNT(*) AS count FROM research_notes")["count"],
+            "experiment_runs": self.store.query_one("SELECT COUNT(*) AS count FROM experiment_runs")["count"],
+            "discussions": self.store.query_one("SELECT COUNT(*) AS count FROM research_discussions")["count"],
+            "grounding_snapshots": self.store.query_one("SELECT COUNT(*) AS count FROM grounding_snapshots")["count"],
+        }
+        rows = self.store.query_all(
+            """
+            SELECT
+                p.*,
+                (SELECT COUNT(*) FROM research_questions q WHERE q.project_id = p.id) AS question_count,
+                (SELECT COUNT(*) FROM research_notes n WHERE n.project_id = p.id) AS note_count,
+                (SELECT COUNT(*) FROM experiment_runs r WHERE r.project_id = p.id) AS experiment_run_count,
+                (SELECT COUNT(*) FROM research_discussions d WHERE d.project_id = p.id) AS discussion_count,
+                (SELECT COUNT(*) FROM grounding_snapshots s WHERE s.project_id = p.id) AS grounding_snapshot_count
+            FROM research_projects p
+            WHERE p.status = 'active'
+            ORDER BY p.updated_at DESC, p.id DESC
+            LIMIT 10
+            """
+        )
+        return {"counts": counts, "active_projects": [dict(row) for row in rows]}
+
+    def search_research(
+        self,
+        q: str,
+        project_id: int | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        query = clean_ws(q)
+        if not query:
+            return []
+        if project_id:
+            self.get_research_project(project_id)
+        needle = f"%{query.lower()}%"
+        limit = max(1, min(int(limit or 50), 100))
+        project_clause = "AND project_id = ?" if project_id else ""
+        project_values: tuple[Any, ...] = (project_id,) if project_id else ()
+        results: list[dict[str, Any]] = []
+
+        project_rows = self.store.query_all(
+            """
+            SELECT id, id AS project_id, title, goal, current_state, created_at
+            FROM research_projects
+            WHERE (lower(title) LIKE ? OR lower(goal) LIKE ? OR lower(current_state) LIKE ?)
+            """
+            + (" AND id = ?" if project_id else "")
+            + " ORDER BY updated_at DESC, id DESC LIMIT ?",
+            (needle, needle, needle, *project_values, limit),
+        )
+        for row in project_rows:
+            results.append(
+                research_search_result(
+                    "research_project",
+                    row,
+                    row["title"],
+                    search_snippet(row["goal"], row["current_state"], row["title"], query=query),
+                    row["created_at"],
+                )
+            )
+
+        query_specs = [
+            (
+                "research_question",
+                """
+                SELECT id, project_id, question AS title, question, current_answer, created_at
+                FROM research_questions
+                WHERE (lower(question) LIKE ? OR lower(current_answer) LIKE ?)
+                """,
+                ("question", "current_answer"),
+            ),
+            (
+                "research_note",
+                """
+                SELECT id, project_id, title, body_markdown, created_at
+                FROM research_notes
+                WHERE (lower(title) LIKE ? OR lower(body_markdown) LIKE ?)
+                """,
+                ("title", "body_markdown"),
+            ),
+            (
+                "experiment_run",
+                """
+                SELECT id, project_id, title, hypothesis, dataset, code_ref, command, metrics_json, summary, created_at
+                FROM experiment_runs
+                WHERE (
+                    lower(title) LIKE ? OR lower(hypothesis) LIKE ? OR lower(dataset) LIKE ?
+                    OR lower(code_ref) LIKE ? OR lower(command) LIKE ? OR lower(metrics_json) LIKE ?
+                    OR lower(summary) LIKE ?
+                )
+                """,
+                ("title", "hypothesis", "dataset", "code_ref", "command", "metrics_json", "summary"),
+            ),
+            (
+                "research_discussion",
+                """
+                SELECT id, project_id, title, title AS body, created_at
+                FROM research_discussions
+                WHERE lower(title) LIKE ?
+                """,
+                ("title", "body"),
+            ),
+            (
+                "research_discussion_message",
+                """
+                SELECT id, project_id, role AS title, content, created_at
+                FROM research_discussion_messages
+                WHERE lower(content) LIKE ?
+                """,
+                ("title", "content"),
+            ),
+            (
+                "grounding_snapshot",
+                """
+                SELECT id, project_id, title, content_markdown, created_at
+                FROM grounding_snapshots
+                WHERE (lower(title) LIKE ? OR lower(content_markdown) LIKE ?)
+                """,
+                ("title", "content_markdown"),
+            ),
+        ]
+        for result_type, base_sql, fields in query_specs:
+            if len(results) >= limit:
+                break
+            placeholders = base_sql.count("?")
+            values: list[Any] = [needle] * placeholders
+            sql = base_sql
+            if project_id:
+                sql += f" {project_clause}"
+                values.extend(project_values)
+            sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
+            values.append(limit - len(results))
+            for row in self.store.query_all(sql, tuple(values)):
+                title = row["title"] or result_type.replace("_", " ").title()
+                snippet = search_snippet(*(row.get(field) for field in fields), query=query)
+                results.append(research_search_result(result_type, row, title, snippet, row["created_at"]))
+                if len(results) >= limit:
+                    break
+        return results
 
     def export_research_project(self, project_id: int) -> str:
         project = self.get_research_project(project_id)

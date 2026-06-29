@@ -682,6 +682,17 @@ def create_app() -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
 
+    @app.get("/api/research/dashboard")
+    async def research_dashboard() -> dict[str, Any]:
+        return await to_thread(service().research_dashboard)
+
+    @app.get("/api/research/search")
+    async def search_research(q: str = "", project_id: int | None = None) -> list[dict[str, Any]]:
+        try:
+            return await to_thread(service().search_research, q, project_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+
     @app.post("/api/papers/{paper_id}/literature-graph/build")
     def build_graph(paper_id: int) -> dict[str, Any]:
         return service().build_literature_graph(paper_id)

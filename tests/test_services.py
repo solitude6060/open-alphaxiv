@@ -889,3 +889,75 @@ def test_discussion_message_references_follow_message_lifecycle(service: PaperSe
 def test_grounding_snapshot_rejects_unknown_project(service: PaperService) -> None:
     with pytest.raises(KeyError, match="research project not found"):
         service.create_grounding_snapshot(999, {"title": "Missing project"})
+
+
+def test_research_dashboard_and_search(service: PaperService) -> None:
+    project = service.create_research_project(
+        {
+            "title": "Attention dashboard",
+            "goal": "Track transformer reproduction work.",
+            "current_state": "Investigating BLEU variance.",
+        }
+    )
+    other_project = service.create_research_project({"title": "Unrelated project"})
+    service.create_research_question(
+        {
+            "project_id": project["id"],
+            "question": "Why does the BLEU score move after tokenization changes?",
+            "current_answer": "Tokenizer settings changed.",
+        }
+    )
+    service.create_research_note(
+        {
+            "project_id": project["id"],
+            "title": "Tokenizer note",
+            "body_markdown": "BLEU changed after switching tokenizer normalization.",
+        }
+    )
+    run = service.create_experiment_run(
+        {
+            "project_id": project["id"],
+            "title": "Tokenizer baseline",
+            "dataset": "WMT14 en-de",
+            "metrics": {"bleu": 29.3},
+            "summary": "Tokenizer normalization explains the variance.",
+        }
+    )
+    discussion = service.create_research_discussion({"project_id": project["id"], "title": "BLEU discussion"})
+    service.create_research_discussion_message(
+        discussion["id"],
+        {"role": "user", "content": "Compare tokenizer normalization before the next run."},
+    )
+    service.create_grounding_snapshot(project["id"], {"title": "Tokenizer grounding"})
+    service.create_research_note(
+        {
+            "project_id": other_project["id"],
+            "title": "Other note",
+            "body_markdown": "This unrelated note also mentions BLEU.",
+        }
+    )
+
+    dashboard = service.research_dashboard()
+    results = service.search_research("tokenizer")
+    scoped_results = service.search_research("bleu", project_id=project["id"])
+    empty_results = service.search_research("")
+
+    assert dashboard["counts"]["projects"] == 2
+    assert dashboard["counts"]["questions"] == 1
+    assert dashboard["counts"]["notes"] == 2
+    assert dashboard["counts"]["experiment_runs"] == 1
+    assert dashboard["counts"]["discussions"] == 1
+    assert dashboard["counts"]["grounding_snapshots"] == 1
+    active_project = next(item for item in dashboard["active_projects"] if item["id"] == project["id"])
+    assert active_project["id"] == project["id"]
+    assert active_project["note_count"] == 1
+    assert active_project["experiment_run_count"] == 1
+    assert any(result["type"] == "research_note" and result["title"] == "Tokenizer note" for result in results)
+    assert any(result["type"] == "experiment_run" and result["id"] == run["id"] for result in results)
+    assert all(result["project_id"] == project["id"] for result in scoped_results)
+    assert empty_results == []
+
+
+def test_research_search_rejects_unknown_project_scope(service: PaperService) -> None:
+    with pytest.raises(KeyError, match="research project not found"):
+        service.search_research("anything", project_id=999)
