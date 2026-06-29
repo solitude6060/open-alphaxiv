@@ -119,7 +119,7 @@ def clean_ws(text: str) -> str:
     return re.sub(r"\s+", " ", text.replace("&amp;", "&")).strip()
 
 
-def build_markdown(meta: dict[str, Any], arxiv_id: str, full_text: str = "") -> str:
+def build_markdown(meta: dict[str, Any], source_label: str, full_text: str = "") -> str:
     body = clean_extracted_text(full_text)
     full_text_section = (
         f"## Full Text\n\n{body}"
@@ -137,7 +137,7 @@ def build_markdown(meta: dict[str, Any], arxiv_id: str, full_text: str = "") -> 
         f"""
         # {meta['title']}
 
-        Source: arXiv:{arxiv_id}
+        Source: {source_label}
 
         Authors: {', '.join(meta['authors'])}
 
@@ -148,6 +148,18 @@ def build_markdown(meta: dict[str, Any], arxiv_id: str, full_text: str = "") -> 
         {full_text_section}
         """
     ).strip()
+
+
+def upload_title_from_filename(filename: str, fallback: str) -> str:
+    stem = Path(filename or "").name
+    stem = Path(stem).stem if stem else ""
+    title = clean_ws(re.sub(r"[_\-]+", " ", stem))
+    return title or fallback
+
+
+def validate_pdf_bytes(pdf_bytes: bytes) -> None:
+    if not pdf_bytes.lstrip().startswith(b"%PDF"):
+        raise ValueError("uploaded file must be a PDF")
 
 
 def clean_extracted_text(text: str) -> str:
@@ -446,8 +458,80 @@ class PaperService:
             ),
         )
         paper_dir = self.storage_dir / "papers" / str(paper_id)
-        paper_dir.mkdir(parents=True, exist_ok=True)
         pdf_bytes = fetch_binary(meta["pdf_url"])
+        self._index_paper_artifacts(
+            paper_id=paper_id,
+            paper_dir=paper_dir,
+            meta=meta,
+            source_label=f"arXiv:{arxiv_id}",
+            pdf_bytes=pdf_bytes,
+            pdf_metadata={"source": meta["pdf_url"]},
+            now=now,
+        )
+        return self.get_paper(paper_id)
+
+    def ingest_uploaded_pdf(self, filename: str, pdf_bytes: bytes, title: str = "") -> dict[str, Any]:
+        validate_pdf_bytes(pdf_bytes)
+        source_id = hashlib.sha256(pdf_bytes).hexdigest()
+        existing = self.store.query_one(
+            "SELECT id FROM papers WHERE source_type = 'upload' AND source_id = ?", (source_id,)
+        )
+        if existing:
+            return self.get_paper(existing["id"])
+
+        display_title = clean_ws(title) or upload_title_from_filename(filename, f"Uploaded paper {source_id[:12]}")
+        meta = {
+            "title": display_title,
+            "abstract": (
+                "Local PDF uploaded into Open AlphaXiv. Extracted text is stored locally "
+                "for reading, search, graph construction, and paper question answering."
+            ),
+            "authors": ["Local upload"],
+            "published_at": "",
+            "pdf_url": "",
+            "landing_url": "",
+        }
+        now = utcnow()
+        paper_id = self.store.execute(
+            """
+            INSERT INTO papers
+                (source_type, source_id, arxiv_id, title, abstract, authors_json,
+                 published_at, pdf_url, landing_url, status, summary, created_at, updated_at)
+            VALUES ('upload', ?, '', ?, ?, ?, ?, '', '', 'indexing', ?, ?, ?)
+            """,
+            (
+                source_id,
+                meta["title"],
+                meta["abstract"],
+                dumps(meta["authors"]),
+                meta["published_at"],
+                summarize(meta["title"], meta["abstract"]),
+                now,
+                now,
+            ),
+        )
+        self._index_paper_artifacts(
+            paper_id=paper_id,
+            paper_dir=self.storage_dir / "papers" / str(paper_id),
+            meta=meta,
+            source_label=f"upload:{Path(filename or '').name or source_id[:12]}",
+            pdf_bytes=pdf_bytes,
+            pdf_metadata={"source": "upload", "filename": filename, "content_hash": source_id},
+            now=now,
+        )
+        return self.get_paper(paper_id)
+
+    def _index_paper_artifacts(
+        self,
+        paper_id: int,
+        paper_dir: Path,
+        meta: dict[str, Any],
+        source_label: str,
+        pdf_bytes: bytes | None,
+        pdf_metadata: dict[str, Any],
+        now: str,
+    ) -> None:
+        paper_dir.mkdir(parents=True, exist_ok=True)
         full_text = ""
         if pdf_bytes:
             pdf_path = paper_dir / "paper.pdf"
@@ -462,7 +546,7 @@ class PaperService:
                     paper_id,
                     str(pdf_path),
                     hashlib.sha256(pdf_bytes).hexdigest(),
-                    dumps({"source": meta["pdf_url"]}),
+                    dumps(pdf_metadata),
                     now,
                 ),
             )
@@ -521,7 +605,7 @@ class PaperService:
                         now,
                     ),
                 )
-        markdown = build_markdown(meta, arxiv_id, full_text)
+        markdown = build_markdown(meta, source_label, full_text)
         markdown_path = paper_dir / "paper.md"
         markdown_path.write_text(markdown, encoding="utf-8")
         self.store.execute(
@@ -556,7 +640,6 @@ class PaperService:
             "UPDATE papers SET status = 'ready', status_reason = '', updated_at = ? WHERE id = ?",
             (utcnow(), paper_id),
         )
-        return self.get_paper(paper_id)
 
     def _build_paper_graph(self, paper_id: int, markdown: str) -> None:
         chunk_rows = self.store.query_all("SELECT id, text FROM chunks WHERE paper_id = ?", (paper_id,))

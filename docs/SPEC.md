@@ -235,6 +235,10 @@ Fields:
 - `POST /api/papers`
   - Input: arXiv URL, PDF URL, DOI, Semantic Scholar ID, or file upload token.
   - Output: paper ID and ingestion job ID.
+- `POST /api/papers/upload`
+  - Input: raw `application/pdf` request body.
+  - Query: `filename` optional original filename, `title` optional display title.
+  - Output: paper ID and ingestion status using the normal paper response shape.
 - `GET /api/papers`
   - Query: search, tag, status, bookmarked, source, date range.
 - `GET /api/papers/{paper_id}`

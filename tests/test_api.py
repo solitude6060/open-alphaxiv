@@ -182,6 +182,43 @@ async def test_chat_session_history_over_http(app: FastAPI) -> None:
 
 
 @pytest.mark.asyncio
+async def test_upload_paper_accepts_raw_pdf_over_http(app: FastAPI) -> None:
+    async with asgi_client(app) as client:
+        response = await client.post(
+            "/api/papers/upload",
+            content=b"%PDF-1.4 local API upload fixture",
+            headers={
+                "content-type": "application/pdf",
+                "x-filename": "local-api-study.pdf",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ready"
+    assert payload["source_type"] == "upload"
+    assert payload["title"] == "local api study"
+    assert payload["full_text_available"] is True
+    assert payload["page_image_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_upload_paper_rejects_non_pdf_over_http(app: FastAPI) -> None:
+    async with asgi_client(app) as client:
+        response = await client.post(
+            "/api/papers/upload",
+            content=b"not a pdf",
+            headers={
+                "content-type": "text/plain",
+                "x-filename": "notes.txt",
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "uploaded file must be a PDF"
+
+
+@pytest.mark.asyncio
 async def test_paper_full_text_and_page_manifest_over_http(app: FastAPI) -> None:
     async with asgi_client(app) as client:
         paper_response = await client.post("/api/papers", json={"source": "https://arxiv.org/abs/2201.08239"})

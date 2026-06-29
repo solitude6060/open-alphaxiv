@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -142,6 +142,15 @@ def create_app() -> FastAPI:
     async def create_paper(payload: PaperCreate) -> dict[str, Any]:
         try:
             return await to_thread(service().ingest_paper, payload.source)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/papers/upload")
+    async def upload_paper(request: Request, filename: str = "", title: str = "") -> dict[str, Any]:
+        pdf_bytes = await request.body()
+        original_filename = filename or request.headers.get("x-filename", "") or "uploaded-paper.pdf"
+        try:
+            return await to_thread(service().ingest_uploaded_pdf, original_filename, pdf_bytes, title)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

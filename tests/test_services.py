@@ -141,6 +141,45 @@ def test_ingest_paper_creates_ready_chunks_and_graph(service: PaperService) -> N
     assert graph["edges"]
 
 
+def test_ingest_uploaded_pdf_creates_ready_upload_paper(service: PaperService) -> None:
+    paper = service.ingest_uploaded_pdf(
+        filename="local-transformer-study.pdf",
+        pdf_bytes=b"%PDF-1.4 uploaded local fixture",
+    )
+
+    assert paper["status"] == "ready"
+    assert paper["source_type"] == "upload"
+    assert paper["arxiv_id"] in {"", None}
+    assert paper["title"] == "local transformer study"
+    assert paper["chunk_count"] >= 3
+    assert paper["full_text_available"] is True
+    assert paper["page_image_count"] == 1
+    assert len(service.chunks(paper["id"])) >= 3
+    assert "scaled dot product attention" in service.paper_text(paper["id"])["text"]
+    assert service.paper_pages(paper["id"])[0]["image_url"].endswith(
+        f"/api/papers/{paper['id']}/pages/1.png"
+    )
+    assert service.paper_text_layers(paper["id"])["pages"][0]["words"][0]["text"] == "Attention"
+    artifact = service.store.query_one(
+        "SELECT * FROM artifacts WHERE paper_id = ? AND artifact_type = 'pdf'",
+        (paper["id"],),
+    )
+    assert artifact
+    assert Path(artifact["storage_uri"]).read_bytes() == b"%PDF-1.4 uploaded local fixture"
+
+    duplicate = service.ingest_uploaded_pdf(
+        filename="renamed.pdf",
+        pdf_bytes=b"%PDF-1.4 uploaded local fixture",
+    )
+
+    assert duplicate["id"] == paper["id"]
+
+
+def test_ingest_uploaded_pdf_rejects_non_pdf_bytes(service: PaperService) -> None:
+    with pytest.raises(ValueError, match="uploaded file must be a PDF"):
+        service.ingest_uploaded_pdf(filename="notes.txt", pdf_bytes=b"not a PDF")
+
+
 def test_page_text_layers_lazy_generation_is_idempotent(service: PaperService) -> None:
     paper = service.ingest_paper("https://arxiv.org/abs/2201.08239")
     artifact = service.store.query_one(
