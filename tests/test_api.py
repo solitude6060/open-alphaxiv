@@ -142,6 +142,46 @@ async def test_chat_messages_accepts_codex_answer_mode_over_http(
 
 
 @pytest.mark.asyncio
+async def test_chat_session_history_over_http(app: FastAPI) -> None:
+    async with asgi_client(app) as client:
+        paper_response = await client.post("/api/papers", json={"source": "https://arxiv.org/abs/2201.08239"})
+        assert paper_response.status_code == 200
+        paper_id = paper_response.json()["id"]
+
+        create_response = await client.post(
+            "/api/chat/sessions",
+            json={"paper_id": paper_id, "title": "Reading thread"},
+        )
+        assert create_response.status_code == 200
+        session_id = create_response.json()["id"]
+
+        first_response = await client.post(
+            f"/api/chat/sessions/{session_id}/messages",
+            json={"paper_id": paper_id, "query": "What is the topic?"},
+        )
+        second_response = await client.post(
+            "/api/chat/messages",
+            json={"paper_id": paper_id, "session_id": session_id, "query": "Continue that answer"},
+        )
+        list_response = await client.get(f"/api/papers/{paper_id}/chat/sessions")
+        get_response = await client.get(f"/api/chat/sessions/{session_id}")
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    assert first_response.json()["session_id"] == session_id
+    assert second_response.json()["session_id"] == session_id
+    assert list_response.status_code == 200
+    assert list_response.json()[0]["message_count"] == 4
+    assert get_response.status_code == 200
+    assert [message["role"] for message in get_response.json()["messages"]] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_paper_full_text_and_page_manifest_over_http(app: FastAPI) -> None:
     async with asgi_client(app) as client:
         paper_response = await client.post("/api/papers", json={"source": "https://arxiv.org/abs/2201.08239"})
@@ -150,7 +190,9 @@ async def test_paper_full_text_and_page_manifest_over_http(app: FastAPI) -> None
 
         text_response = await client.get(f"/api/papers/{paper_id}/fulltext")
         pages_response = await client.get(f"/api/papers/{paper_id}/pages")
+        text_layers_response = await client.get(f"/api/papers/{paper_id}/pages/text")
         text_layer_response = await client.get(f"/api/papers/{paper_id}/pages/1/text")
+        missing_text_layer_response = await client.get(f"/api/papers/{paper_id}/pages/999/text")
         image_response = await client.get(f"/api/papers/{paper_id}/pages/1.png")
 
     assert text_response.status_code == 200
@@ -158,8 +200,11 @@ async def test_paper_full_text_and_page_manifest_over_http(app: FastAPI) -> None
     assert pages_response.status_code == 200
     assert pages_response.json()[0]["image_url"].endswith(f"/api/papers/{paper_id}/pages/1.png")
     assert pages_response.json()[0]["text_layer_url"].endswith(f"/api/papers/{paper_id}/pages/1/text")
+    assert text_layers_response.status_code == 200
+    assert text_layers_response.json()["pages"][0]["words"][0]["text"] == "Attention"
     assert text_layer_response.status_code == 200
     assert text_layer_response.json()["words"][0]["text"] == "Attention"
+    assert missing_text_layer_response.status_code == 404
     assert image_response.status_code == 200
     assert image_response.headers["content-type"] == "image/png"
 

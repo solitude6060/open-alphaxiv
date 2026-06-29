@@ -171,6 +171,13 @@ def create_app() -> FastAPI:
     async def paper_pages(paper_id: int) -> list[dict[str, Any]]:
         return service().paper_pages(paper_id)
 
+    @app.get("/api/papers/{paper_id}/pages/text")
+    async def paper_text_layers(paper_id: int) -> dict[str, Any]:
+        try:
+            return await to_thread(service().paper_text_layers, paper_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @app.get("/api/papers/{paper_id}/pages/{page_number}.png")
     async def paper_page_image(paper_id: int, page_number: int) -> Response:
         try:
@@ -181,7 +188,10 @@ def create_app() -> FastAPI:
 
     @app.get("/api/papers/{paper_id}/pages/{page_number}/text")
     async def paper_page_text(paper_id: int, page_number: int) -> dict[str, Any]:
-        return service().paper_page_text_layer(paper_id, page_number)
+        try:
+            return await to_thread(service().paper_page_text_layer, paper_id, page_number)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/api/papers/{paper_id}/bookmark")
     def bookmark(paper_id: int, payload: BookmarkUpdate) -> dict[str, Any]:
@@ -192,8 +202,25 @@ def create_app() -> FastAPI:
         return service().update_tags(paper_id, payload.tags)
 
     @app.post("/api/chat/sessions")
-    def chat_session(payload: ChatCreate) -> dict[str, Any]:
-        return service().create_chat_session(payload.paper_id, payload.title)
+    async def chat_session(payload: ChatCreate) -> dict[str, Any]:
+        try:
+            return await to_thread(service().create_chat_session, payload.paper_id, payload.title)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/papers/{paper_id}/chat/sessions")
+    async def paper_chat_sessions(paper_id: int) -> list[dict[str, Any]]:
+        try:
+            return await to_thread(service().list_chat_sessions, paper_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/chat/sessions/{session_id}")
+    async def get_chat_session(session_id: int) -> dict[str, Any]:
+        try:
+            return await to_thread(service().get_chat_session, session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/api/chat/messages")
     async def ask(payload: ChatAsk) -> dict[str, Any]:
@@ -211,6 +238,12 @@ def create_app() -> FastAPI:
             )
         except (ValueError, RuntimeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/chat/sessions/{session_id}/messages")
+    async def ask_in_session(session_id: int, payload: ChatAsk) -> dict[str, Any]:
+        return await ask(payload.model_copy(update={"session_id": session_id}))
 
     @app.get("/api/chat/messages/{message_id}/retrieval")
     def retrieval(message_id: int) -> dict[str, Any]:

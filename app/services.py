@@ -13,6 +13,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from collections import Counter
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from .store import Store, dumps, loads, utcnow
@@ -356,6 +357,8 @@ class PaperService:
         self.store = store
         self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
+        self._text_layer_locks: dict[int, Lock] = {}
+        self._text_layer_locks_guard = Lock()
 
     def create_provider(self, payload: dict[str, Any]) -> dict[str, Any]:
         now = utcnow()
@@ -694,27 +697,55 @@ class PaperService:
         raise KeyError("page image not found")
 
     def paper_page_text_layer(self, paper_id: int, page_number: int) -> dict[str, Any]:
-        artifact = self._ensure_page_text_layers(paper_id)
-        if not artifact:
-            return {"paper_id": paper_id, "page_number": page_number, "width": 0, "height": 0, "words": []}
-        payload = loads(Path(artifact["storage_uri"]).read_text(encoding="utf-8"), {"pages": []})
+        self.paper_page_image_path(paper_id, page_number)
+        payload = self.paper_text_layers(paper_id)
         for page in payload.get("pages", []):
             if int(page.get("page_number") or 0) == page_number:
                 return {"paper_id": paper_id, **page}
         return {"paper_id": paper_id, "page_number": page_number, "width": 0, "height": 0, "words": []}
 
-    def _ensure_page_text_layers(self, paper_id: int) -> dict[str, Any] | None:
-        artifact = self.store.query_one(
+    def paper_text_layers(self, paper_id: int) -> dict[str, Any]:
+        self.get_paper(paper_id)
+        artifact = self._ensure_page_text_layers(paper_id)
+        if not artifact:
+            return {"paper_id": paper_id, "pages": []}
+        try:
+            payload = loads(Path(artifact["storage_uri"]).read_text(encoding="utf-8"), {"pages": []})
+        except (OSError, ValueError):
+            return {"paper_id": paper_id, "pages": []}
+        return {"paper_id": paper_id, "pages": payload.get("pages", [])}
+
+    def _page_text_layers_artifact(self, paper_id: int) -> dict[str, Any] | None:
+        rows = self.store.query_all(
             """
             SELECT * FROM artifacts
             WHERE paper_id = ? AND artifact_type = 'page_text_layers'
             ORDER BY id
-            LIMIT 1
             """,
             (paper_id,),
         )
+        for row in rows:
+            if Path(row["storage_uri"]).exists():
+                return row
+        return None
+
+    def _text_layer_lock(self, paper_id: int) -> Lock:
+        with self._text_layer_locks_guard:
+            if paper_id not in self._text_layer_locks:
+                self._text_layer_locks[paper_id] = Lock()
+            return self._text_layer_locks[paper_id]
+
+    def _ensure_page_text_layers(self, paper_id: int) -> dict[str, Any] | None:
+        artifact = self._page_text_layers_artifact(paper_id)
         if artifact:
             return artifact
+        with self._text_layer_lock(paper_id):
+            artifact = self._page_text_layers_artifact(paper_id)
+            if artifact:
+                return artifact
+            return self._build_page_text_layers(paper_id)
+
+    def _build_page_text_layers(self, paper_id: int) -> dict[str, Any] | None:
         pdf_artifact = self.store.query_one(
             """
             SELECT * FROM artifacts
@@ -783,11 +814,59 @@ class PaperService:
         return self.get_paper(paper_id)
 
     def create_chat_session(self, paper_id: int, title: str = "Paper chat") -> dict[str, Any]:
+        self.get_paper(paper_id)
+        now = utcnow()
         session_id = self.store.execute(
             "INSERT INTO chat_sessions (paper_id, title, created_at) VALUES (?, ?, ?)",
-            (paper_id, title, utcnow()),
+            (paper_id, title, now),
         )
-        return {"id": session_id, "paper_id": paper_id, "title": title}
+        return {"id": session_id, "paper_id": paper_id, "title": title, "created_at": now, "messages": []}
+
+    def list_chat_sessions(self, paper_id: int) -> list[dict[str, Any]]:
+        self.get_paper(paper_id)
+        return self.store.query_all(
+            """
+            SELECT
+                s.id,
+                s.paper_id,
+                s.title,
+                s.created_at,
+                COUNT(m.id) AS message_count,
+                MAX(m.created_at) AS latest_message_at
+            FROM chat_sessions s
+            LEFT JOIN chat_messages m ON m.session_id = s.id
+            WHERE s.paper_id = ?
+            GROUP BY s.id
+            ORDER BY COALESCE(latest_message_at, s.created_at) DESC, s.id DESC
+            """,
+            (paper_id,),
+        )
+
+    def get_chat_session(self, session_id: int) -> dict[str, Any]:
+        row = self.store.query_one(
+            "SELECT id, paper_id, title, created_at FROM chat_sessions WHERE id = ?",
+            (session_id,),
+        )
+        if not row:
+            raise KeyError("chat session not found")
+        row["messages"] = self.chat_messages(session_id)
+        return row
+
+    def chat_messages(self, session_id: int) -> list[dict[str, Any]]:
+        rows = self.store.query_all(
+            """
+            SELECT id, session_id, role, content, metadata_json, created_at
+            FROM chat_messages
+            WHERE session_id = ?
+            ORDER BY id
+            """,
+            (session_id,),
+        )
+        messages = []
+        for row in rows:
+            metadata = loads(row.pop("metadata_json"), {})
+            messages.append({**row, "metadata": metadata})
+        return messages
 
     def ask(
         self,
@@ -802,8 +881,14 @@ class PaperService:
     ) -> dict[str, Any]:
         if session_id is None:
             session_id = self.create_chat_session(paper_id)["id"]
+        else:
+            session = self.get_chat_session(session_id)
+            if session["paper_id"] != paper_id:
+                raise ValueError("chat session does not belong to this paper")
+        conversation_history = self.chat_messages(session_id)[-12:]
         selected_text = clean_ws(selected_text)[:1800]
         system_prompt = clean_ws(system_prompt)[:4000]
+        context_scope = "selection" if selected_text or selected_image else "whole_paper"
         user_message_id = self.store.execute(
             "INSERT INTO chat_messages (session_id, role, content, metadata_json, created_at) VALUES (?, 'user', ?, '{}', ?)",
             (session_id, query, utcnow()),
@@ -815,6 +900,7 @@ class PaperService:
         if answer_mode == "codex":
             paper = self.get_paper(paper_id)
             paper_context = self.paper_text(paper_id)["text"]
+            file_references = self.paper_file_references(paper_id, paper)
             answer, run_metadata = codex_answer(
                 paper,
                 query,
@@ -822,6 +908,8 @@ class PaperService:
                 selected_text,
                 selected_image,
                 system_prompt,
+                conversation_history,
+                file_references,
                 codex_options or {},
             )
             provider = "codex"
@@ -838,6 +926,7 @@ class PaperService:
             "answer_mode": answer_mode,
             "retrieved_chunk_ids": [item["id"] for item in ranked],
             "retrieval": ranked,
+            "context_scope": context_scope,
             "selected_text_preview": selected_text[:240],
             "selected_image": selected_image or None,
             "system_prompt_preview": system_prompt[:240] if answer_mode == "codex" else "",
@@ -854,6 +943,7 @@ class PaperService:
         return {
             "session_id": session_id,
             "message_id": assistant_message_id,
+            "user_message_id": user_message_id,
             "answer": answer,
             "citations": [
                 {
@@ -865,6 +955,23 @@ class PaperService:
                 for item in ranked
             ],
             "retrieval": metadata,
+        }
+
+    def paper_file_references(self, paper_id: int, paper: dict[str, Any] | None = None) -> dict[str, str]:
+        paper = paper or self.get_paper(paper_id)
+        pdf_artifact = self.store.query_one(
+            """
+            SELECT storage_uri FROM artifacts
+            WHERE paper_id = ? AND artifact_type = 'pdf'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (paper_id,),
+        )
+        return {
+            "landing_url": paper.get("landing_url", ""),
+            "pdf_url": paper.get("pdf_url", ""),
+            "local_pdf_path": pdf_artifact["storage_uri"] if pdf_artifact else "",
         }
 
     def retrieve(self, paper_id: int, query: str, limit: int = 4) -> list[dict[str, Any]]:
@@ -1055,6 +1162,8 @@ def codex_answer(
     selected_text: str,
     selected_image: dict[str, Any] | None,
     system_prompt: str,
+    conversation_history: list[dict[str, Any]],
+    file_references: dict[str, str],
     options: dict[str, Any],
 ) -> tuple[str, dict[str, Any]]:
     if not options.get("enabled"):
@@ -1078,6 +1187,8 @@ def codex_answer(
         selected_text,
         selected_image,
         system_prompt,
+        conversation_history,
+        file_references,
     )
     command = [
         resolved_cli,
@@ -1130,8 +1241,11 @@ def codex_answer(
         "codex_cli_path": resolved_cli,
         "codex_stderr_preview": clean_ws(result.stderr)[-500:],
         "context_strategy": "full_text",
+        "context_scope": "selection" if selected_text or selected_image else "whole_paper",
         "paper_context_chars": len(paper_context),
         "system_prompt_chars": len(system_prompt),
+        "conversation_message_count": len(conversation_history),
+        "paper_file_references": file_references,
         "model": model or "codex-local-agent",
     }
 
@@ -1143,6 +1257,8 @@ def build_codex_paper_prompt(
     selected_text: str,
     selected_image: dict[str, Any] | None,
     system_prompt: str = "",
+    conversation_history: list[dict[str, Any]] | None = None,
+    file_references: dict[str, str] | None = None,
 ) -> str:
     context_limit = 75_000
     clean_context = clean_extracted_text(paper_context)
@@ -1156,6 +1272,13 @@ def build_codex_paper_prompt(
     selected = clean_ws(selected_text)[:1800] or "(none)"
     custom_instructions = clean_ws(system_prompt)[:4000] or "(none)"
     image = format_selected_image(selected_image)
+    history = format_conversation_history(conversation_history or [])
+    links = format_paper_file_references(file_references or {})
+    context_scope = (
+        "The user selected a specific passage or image region. Treat that selection as the primary focus."
+        if selected_text or selected_image
+        else "No passage or image region is selected. Treat the whole paper file and extracted paper context as the active context."
+    )
     return textwrap.dedent(
         f"""
         You are answering a research paper question inside Open AlphaXiv Local.
@@ -1166,6 +1289,10 @@ def build_codex_paper_prompt(
         - If the evidence is insufficient, say exactly what is missing.
         - Prefer concise answers grounded in the paper context over retrieval-style chunk citations.
         - Keep the answer concise and technical.
+        - Preserve continuity with the conversation history when it is relevant.
+
+        Context scope:
+        {context_scope}
 
         User-configured system prompt:
         {custom_instructions}
@@ -1174,6 +1301,12 @@ def build_codex_paper_prompt(
         Title: {paper['title']}
         arXiv: {paper.get('arxiv_id') or paper.get('source_id')}
         Authors: {', '.join(paper.get('authors', []))}
+
+        Paper file references:
+        {links}
+
+        Conversation history:
+        {history}
 
         Selected passage:
         {selected}
@@ -1188,6 +1321,28 @@ def build_codex_paper_prompt(
         {context}
         """
     ).strip()
+
+
+def format_conversation_history(messages: list[dict[str, Any]]) -> str:
+    if not messages:
+        return "(none)"
+    lines = []
+    for message in messages[-12:]:
+        role = str(message.get("role", "message"))
+        content = clean_ws(str(message.get("content", "")))[:1200]
+        if content:
+            lines.append(f"{role}: {content}")
+    return "\n".join(lines) if lines else "(none)"
+
+
+def format_paper_file_references(file_references: dict[str, str]) -> str:
+    rows = [
+        ("Landing URL", file_references.get("landing_url", "")),
+        ("PDF URL", file_references.get("pdf_url", "")),
+        ("Local PDF path", file_references.get("local_pdf_path", "")),
+    ]
+    lines = [f"- {label}: {value}" for label, value in rows if value]
+    return "\n".join(lines) if lines else "(none)"
 
 
 def format_selected_image(selected_image: dict[str, Any] | None) -> str:

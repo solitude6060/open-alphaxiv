@@ -90,6 +90,9 @@ type GraphEdge = {
 };
 
 type ChatResult = {
+  session_id: number;
+  message_id: number;
+  user_message_id: number;
   answer: string;
   citations: Array<{ chunk_id: number; section_path: string; score: number; text: string }>;
   retrieval: {
@@ -97,9 +100,35 @@ type ChatResult = {
     model: string;
     answer_mode: "mock" | "codex";
     context_strategy?: string;
+    context_scope?: "selection" | "whole_paper";
     paper_context_chars?: number;
     selected_image?: ImageSelection | null;
   };
+};
+
+type ChatMessage = {
+  id: number;
+  session_id: number;
+  role: "user" | "assistant";
+  content: string;
+  metadata: {
+    provider?: string;
+    model?: string;
+    answer_mode?: "mock" | "codex";
+    context_strategy?: string;
+    context_scope?: "selection" | "whole_paper";
+  };
+  created_at: string;
+};
+
+type ChatSession = {
+  id: number;
+  paper_id: number;
+  title: string;
+  created_at: string;
+  latest_message_at?: string;
+  message_count?: number;
+  messages?: ChatMessage[];
 };
 
 type PaperPage = {
@@ -123,6 +152,11 @@ type PageTextLayer = {
   width: number;
   height: number;
   words: PageTextWord[];
+};
+
+type PageTextLayersPayload = {
+  paper_id: number;
+  pages: PageTextLayer[];
 };
 
 type ImageSelection = {
@@ -190,7 +224,9 @@ function App() {
   const [pages, setPages] = useState<PaperPage[]>([]);
   const [pageTextLayers, setPageTextLayers] = useState<Record<number, PageTextLayer>>({});
   const [selectionMode, setSelectionMode] = useState<"text" | "area">("text");
-  const [chatResult, setChatResult] = useState<ChatResult | null>(null);
+  const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<number | null>(null);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [graphView, setGraphView] = useState("related");
   const [graph, setGraph] = useState<{ nodes: GraphNode[]; edges: GraphEdge[] } | null>(null);
   const [activeTool, setActiveTool] = useState<"assistant" | "notes" | "similar" | "codex">("assistant");
@@ -239,7 +275,11 @@ function App() {
   useEffect(() => {
     setSelectedText("");
     setSelectedImage(null);
-    setChatResult(null);
+    setActiveSessionId(null);
+    setChatMessages([]);
+    if (selectedPaper) {
+      loadChatSessions(selectedPaper.id).catch((err) => setError(String(err.message || err)));
+    }
   }, [selectedPaper?.id]);
 
   useEffect(() => {
@@ -279,21 +319,64 @@ function App() {
 
   async function askPaper() {
     if (!selectedPaper) return;
+    const question = query.trim();
+    if (!question) return;
     setError("");
     setStatus(answerMode === "codex" ? "Asking Codex with paper context" : "Asking local mock model");
     const result = await request<ChatResult>("/api/chat/messages", {
       method: "POST",
       body: JSON.stringify({
         paper_id: selectedPaper.id,
-        query,
+        query: question,
+        session_id: activeSessionId,
         selected_text: selectedText,
         selected_image: selectedImage,
         system_prompt: answerMode === "codex" ? codexSystemPrompt : "",
         answer_mode: answerMode
       })
     });
-    setChatResult(result);
+    setActiveSessionId(result.session_id);
+    await Promise.all([
+      loadChatSession(result.session_id),
+      refreshChatSessions(selectedPaper.id)
+    ]);
+    setQuery("");
     setStatus("Answer generated");
+  }
+
+  async function refreshChatSessions(paperId: number) {
+    const sessions = await request<ChatSession[]>(`/api/papers/${paperId}/chat/sessions`);
+    setChatSessions(sessions);
+    return sessions;
+  }
+
+  async function loadChatSessions(paperId: number) {
+    const sessions = await refreshChatSessions(paperId);
+    const nextSessionId = sessions[0]?.id || null;
+    setActiveSessionId(nextSessionId);
+    if (nextSessionId) {
+      await loadChatSession(nextSessionId);
+    } else {
+      setChatMessages([]);
+    }
+  }
+
+  async function loadChatSession(sessionId: number) {
+    const session = await request<ChatSession>(`/api/chat/sessions/${sessionId}`);
+    setActiveSessionId(session.id);
+    setChatMessages(session.messages || []);
+  }
+
+  async function startChatSession() {
+    if (!selectedPaper) return;
+    setError("");
+    const session = await request<ChatSession>("/api/chat/sessions", {
+      method: "POST",
+      body: JSON.stringify({ paper_id: selectedPaper.id, title: "Paper chat" })
+    });
+    setChatSessions((sessions) => [session, ...sessions]);
+    setActiveSessionId(session.id);
+    setChatMessages([]);
   }
 
   async function loadPaperData(paperId: number, view: string) {
@@ -306,22 +389,18 @@ function App() {
     ]);
     setPages(pageRows);
     setGraph(graphData);
-    const layerEntries = await Promise.all(
-      pageRows.map(async (page) => {
-        try {
-          const layer = await request<PageTextLayer>(
-            page.text_layer_url || `/api/papers/${paperId}/pages/${page.page_number}/text`
-          );
-          return [page.page_number, layer] as const;
-        } catch {
-          return [
-            page.page_number,
-            { paper_id: paperId, page_number: page.page_number, width: 0, height: 0, words: [] }
-          ] as const;
-        }
-      })
-    );
-    setPageTextLayers(Object.fromEntries(layerEntries));
+    if (pageRows.length === 0) {
+      setPageTextLayers({});
+      return;
+    }
+    try {
+      const layerPayload = await request<PageTextLayersPayload>(`/api/papers/${paperId}/pages/text`);
+      setPageTextLayers(
+        Object.fromEntries(layerPayload.pages.map((layer) => [layer.page_number, layer] as const))
+      );
+    } catch {
+      setPageTextLayers({});
+    }
   }
 
   async function toggleBookmark() {
@@ -569,7 +648,14 @@ function App() {
               <section className="pdf-empty-state">
                 <BookOpen size={24} />
                 <h2>PDF pages unavailable</h2>
-                <p>This paper was imported before page rendering was available. Re-import it to show selectable PDF pages.</p>
+                <p>
+                  PDF page rendering is unavailable for this paper. The abstract remains available for reading and
+                  question answering.
+                </p>
+                <div className="pdf-fallback-abstract">
+                  <strong>Abstract</strong>
+                  <p>{selectedPaper.abstract}</p>
+                </div>
               </section>
             )}
           </article>
@@ -619,6 +705,28 @@ function App() {
                     Enable the local Codex agent in the backend before using Codex for paper chat.
                   </p>
                 ) : null}
+                <div className="conversation-controls">
+                  <select
+                    value={activeSessionId || ""}
+                    onChange={(event) => {
+                      const sessionId = Number(event.target.value);
+                      if (sessionId) {
+                        loadChatSession(sessionId).catch((err) => setError(String(err.message || err)));
+                      }
+                    }}
+                    aria-label="Conversation"
+                  >
+                    {chatSessions.length === 0 ? <option value="">New conversation</option> : null}
+                    {chatSessions.map((session) => (
+                      <option key={session.id} value={session.id}>
+                        {session.title} · {session.message_count || 0} messages
+                      </option>
+                    ))}
+                  </select>
+                  <button type="button" onClick={() => startChatSession().catch((err) => setError(String(err.message || err)))} title="New conversation">
+                    <Plus size={15} />
+                  </button>
+                </div>
                 {answerMode === "codex" && codexSystemPrompt.trim() ? (
                   <div className="prompt-applied">
                     <KeyRound size={15} />
@@ -643,19 +751,44 @@ function App() {
                     </button>
                   </div>
                 ) : null}
-                <textarea value={query} onChange={(event) => setQuery(event.target.value)} />
+                {!selectedText && !selectedImage ? (
+                  <div className="whole-paper-context">
+                    <BookOpen size={15} />
+                    <span>Whole paper context will be sent when you ask.</span>
+                  </div>
+                ) : null}
+                <div className="conversation-thread" aria-label="Paper conversation">
+                  {chatMessages.length === 0 ? (
+                    <div className="conversation-empty">Ask a question to start a paper conversation.</div>
+                  ) : (
+                    chatMessages.map((message) => (
+                      <article className={`chat-message ${message.role}`} key={message.id}>
+                        <div className="chat-message-meta">
+                          <strong>{message.role === "assistant" ? "Assistant" : "You"}</strong>
+                          {message.metadata?.provider ? (
+                            <span>
+                              {message.metadata.provider} / {message.metadata.model}
+                              {message.metadata.context_scope === "whole_paper" ? " / whole paper" : ""}
+                            </span>
+                          ) : null}
+                        </div>
+                        {message.role === "assistant" ? (
+                          <MarkdownAnswer markdown={message.content} />
+                        ) : (
+                          <p>{message.content}</p>
+                        )}
+                      </article>
+                    ))
+                  )}
+                </div>
+                <textarea
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder="Ask a follow-up about this paper..."
+                />
                 <button className="primary wide" onClick={askPaper}>
                   <MessageSquare size={16} /> Ask paper
                 </button>
-                {chatResult ? (
-                  <div className="answer">
-                    <div className="answer-meta">
-                      {chatResult.retrieval.provider} / {chatResult.retrieval.model}
-                      {chatResult.retrieval.context_strategy === "full_text" ? " / full text" : ""}
-                    </div>
-                    <MarkdownAnswer markdown={chatResult.answer} />
-                  </div>
-                ) : null}
               </section>
             ) : null}
 
@@ -883,7 +1016,8 @@ function renderMarkdownBlocks(markdown: string) {
       continue;
     }
 
-    const paragraph: string[] = [];
+    const paragraph: string[] = [line.trim()];
+    index += 1;
     while (index < lines.length && lines[index].trim() && !isMarkdownBlockStart(lines, index)) {
       paragraph.push(lines[index].trim());
       index += 1;

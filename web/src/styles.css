@@ -719,6 +719,29 @@ a {
   line-height: 1.5;
 }
 
+.pdf-fallback-abstract {
+  width: min(620px, 100%);
+  margin-top: 10px;
+  border: 1px solid #dbe3e6;
+  border-radius: 8px;
+  padding: 14px;
+  display: grid;
+  gap: 8px;
+  background: #fff;
+  color: #263a41;
+  text-align: left;
+}
+
+.pdf-fallback-abstract strong {
+  font-size: 13px;
+}
+
+.pdf-fallback-abstract p {
+  max-width: none;
+  color: #405157;
+  font-size: 14px;
+}
+
 .tool-panel {
   min-width: 0;
   overflow: hidden;
@@ -833,6 +856,45 @@ textarea {
   font-size: 13px;
 }
 
+.conversation-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 36px;
+  gap: 8px;
+}
+
+.conversation-controls select {
+  min-width: 0;
+  border: 1px solid #d6e0e3;
+  border-radius: 6px;
+  padding: 8px 9px;
+  background: #fff;
+  color: #263a41;
+  font-size: 13px;
+}
+
+.conversation-controls button {
+  border: 1px solid #d6e0e3;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  background: #f8fbfc;
+  color: #2d7d6f;
+}
+
+.whole-paper-context {
+  min-height: 38px;
+  border: 1px solid #d6e0e3;
+  border-radius: 8px;
+  padding: 9px 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #f8fbfc;
+  color: #405157;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
 .selected-quote {
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr) auto;
@@ -903,6 +965,62 @@ textarea {
   color: #526870;
   font-size: 12px;
   font-weight: 800;
+}
+
+.conversation-thread {
+  max-height: 440px;
+  overflow: auto;
+  display: grid;
+  gap: 10px;
+}
+
+.conversation-empty {
+  border: 1px dashed #cad5d9;
+  border-radius: 8px;
+  padding: 13px;
+  background: #f8fbfc;
+  color: #62777e;
+  font-size: 13px;
+}
+
+.chat-message {
+  min-width: 0;
+  display: grid;
+  gap: 7px;
+}
+
+.chat-message-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  color: #526870;
+  font-size: 12px;
+}
+
+.chat-message-meta strong {
+  color: #172026;
+}
+
+.chat-message-meta span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-message.user p {
+  margin: 0;
+  border: 1px solid #cfe9e4;
+  border-radius: 8px;
+  padding: 10px;
+  background: #f0faf8;
+  color: #20353a;
+  line-height: 1.5;
+}
+
+.chat-message.assistant .markdown-answer {
+  background: #fff;
 }
 
 .answer > p {
