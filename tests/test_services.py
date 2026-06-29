@@ -591,3 +591,101 @@ def test_research_links_require_note_or_discussion_owner(service: PaperService) 
             VALUES (NULL, NULL, NULL, 'paper', 'supports', '1', '', '', '', '{}', 'now')
             """
         )
+
+
+def test_experiment_runs_artifacts_notes_and_export(service: PaperService) -> None:
+    project = service.create_research_project({"title": "Experiment tracking"})
+    run = service.create_experiment_run(
+        {
+            "project_id": project["id"],
+            "title": "Attention baseline reproduction",
+            "hypothesis": "Scaled dot product attention should reproduce the reported BLEU trend.",
+            "dataset": "WMT14 en-de",
+            "code_ref": "git:abc123",
+            "command": "python train.py --config configs/attention.yaml",
+            "parameters": {"learning_rate": 0.0003, "seed": 7},
+            "metrics": {"bleu": 28.4, "loss": 1.21},
+            "summary": "Initial run is below the target score.",
+        }
+    )
+    updated = service.update_experiment_run(
+        run["id"],
+        {
+            "status": "completed",
+            "completed_at": "2026-06-30T10:00:00+00:00",
+            "metrics": {"bleu": 29.1, "loss": 1.08},
+            "summary": "Baseline reproduced within tolerance.",
+        },
+    )
+    artifact = service.create_experiment_artifact(
+        run["id"],
+        {
+            "artifact_type": "metrics",
+            "uri": "file:///runs/attention-baseline/metrics.json",
+            "label": "Metrics JSON",
+            "metadata": {"sha256": "abc123"},
+        },
+    )
+    note = service.create_experiment_research_note(
+        run["id"],
+        {"project_id": project["id"], "title": "Baseline run summary"},
+    )
+    artifact_note = service.create_research_note(
+        {
+            "project_id": project["id"],
+            "title": "Artifact note",
+            "body_markdown": "Metrics artifact supports the reproduction claim.",
+        }
+    )
+    artifact_link = service.create_research_link(
+        artifact_note["id"],
+        {
+            "link_type": "experiment_artifact",
+            "relation": "supports",
+            "target_id": str(artifact["id"]),
+            "label": artifact["label"],
+        },
+    )
+
+    assert run["status"] == "planned"
+    assert run["parameters"]["seed"] == 7
+    assert updated["status"] == "completed"
+    assert updated["metrics"]["bleu"] == 29.1
+    assert artifact["run_id"] == run["id"]
+    assert service.experiment_run_artifacts(run["id"])[0]["uri"].endswith("/metrics.json")
+    assert note["note_type"] == "experiment_note"
+    assert service.research_note_links(note["id"])[0]["link_type"] == "experiment_run"
+    assert artifact_link["link_type"] == "experiment_artifact"
+
+    exported = service.export_research_project(project["id"])
+
+    assert "## Experiment Runs" in exported
+    assert "Attention baseline reproduction" in exported
+    assert "WMT14 en-de" in exported
+    assert "bleu: 29.1" in exported
+    assert "Metrics JSON" in exported
+    assert "[Experiment run: Attention baseline reproduction]" in exported
+    assert "[Experiment artifact: Metrics JSON]" in exported
+
+
+def test_research_links_validate_experiment_targets(service: PaperService) -> None:
+    project = service.create_research_project({"title": "Experiment target validation"})
+    note = service.create_research_note(
+        {
+            "project_id": project["id"],
+            "title": "Invalid experiment evidence",
+            "body_markdown": "This should not link to missing experiment records.",
+        }
+    )
+
+    with pytest.raises(KeyError, match="experiment run not found"):
+        service.create_research_link(
+            note["id"],
+            {"link_type": "experiment_run", "relation": "supports", "target_id": "999"},
+        )
+
+    with pytest.raises(KeyError, match="experiment artifact not found"):
+        service.create_research_link(
+            note["id"],
+            {"link_type": "experiment_artifact", "relation": "supports", "target_id": "999"},
+        )

@@ -188,6 +188,35 @@ class Store:
                     updated_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS experiment_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                    title TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'planned',
+                    hypothesis TEXT NOT NULL DEFAULT '',
+                    dataset TEXT NOT NULL DEFAULT '',
+                    code_ref TEXT NOT NULL DEFAULT '',
+                    command TEXT NOT NULL DEFAULT '',
+                    parameters_json TEXT NOT NULL DEFAULT '{}',
+                    metrics_json TEXT NOT NULL DEFAULT '{}',
+                    summary TEXT NOT NULL DEFAULT '',
+                    started_at TEXT NOT NULL DEFAULT '',
+                    completed_at TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS experiment_artifacts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id INTEGER NOT NULL REFERENCES experiment_runs(id) ON DELETE CASCADE,
+                    artifact_type TEXT NOT NULL DEFAULT 'other',
+                    uri TEXT NOT NULL DEFAULT '',
+                    label TEXT NOT NULL DEFAULT '',
+                    description TEXT NOT NULL DEFAULT '',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS research_links (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     project_id INTEGER REFERENCES research_projects(id) ON DELETE CASCADE,

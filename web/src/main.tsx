@@ -230,6 +230,21 @@ type ResearchNote = {
   links: ResearchLink[];
 };
 
+type ExperimentRun = {
+  id: number;
+  project_id: number;
+  title: string;
+  status: string;
+  hypothesis: string;
+  dataset: string;
+  code_ref: string;
+  command: string;
+  parameters: Record<string, unknown>;
+  metrics: Record<string, unknown>;
+  summary: string;
+  artifact_count: number;
+};
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, {
     ...options,
@@ -277,12 +292,19 @@ function App() {
   const [selectedProjectId, setSelectedProjectId] = useState<number | null>(null);
   const [researchQuestions, setResearchQuestions] = useState<ResearchQuestion[]>([]);
   const [researchNotes, setResearchNotes] = useState<ResearchNote[]>([]);
+  const [experimentRuns, setExperimentRuns] = useState<ExperimentRun[]>([]);
   const [projectTitle, setProjectTitle] = useState("New research project");
   const [projectGoal, setProjectGoal] = useState("");
   const [projectCurrentState, setProjectCurrentState] = useState("");
   const [researchQuestion, setResearchQuestion] = useState("");
   const [noteTitle, setNoteTitle] = useState("");
   const [noteBody, setNoteBody] = useState("");
+  const [experimentTitle, setExperimentTitle] = useState("");
+  const [experimentDataset, setExperimentDataset] = useState("");
+  const [experimentCodeRef, setExperimentCodeRef] = useState("");
+  const [experimentCommand, setExperimentCommand] = useState("");
+  const [experimentMetrics, setExperimentMetrics] = useState('{"metric": 0}');
+  const [experimentSummary, setExperimentSummary] = useState("");
   const [status, setStatus] = useState("Loading local workspace");
   const [error, setError] = useState("");
 
@@ -323,14 +345,17 @@ function App() {
     if (!nextProjectId) {
       setResearchQuestions([]);
       setResearchNotes([]);
+      setExperimentRuns([]);
       return;
     }
-    const [questions, notes] = await Promise.all([
+    const [questions, notes, runs] = await Promise.all([
       request<ResearchQuestion[]>(`/api/research/questions?project_id=${nextProjectId}`),
-      request<ResearchNote[]>(`/api/research/notes?project_id=${nextProjectId}`)
+      request<ResearchNote[]>(`/api/research/notes?project_id=${nextProjectId}`),
+      request<ExperimentRun[]>(`/api/experiments/runs?project_id=${nextProjectId}`)
     ]);
     setResearchQuestions(questions);
     setResearchNotes(notes);
+    setExperimentRuns(runs);
   }
 
   useEffect(() => {
@@ -556,6 +581,47 @@ function App() {
     setNoteTitle("");
     setNoteBody("");
     await refreshResearch(selectedProjectId);
+  }
+
+  async function createExperimentRun() {
+    if (!selectedProjectId || !experimentTitle.trim()) return;
+    let metrics: Record<string, unknown> = {};
+    try {
+      metrics = experimentMetrics.trim() ? JSON.parse(experimentMetrics) : {};
+    } catch {
+      setError("Experiment metrics must be valid JSON");
+      return;
+    }
+    await request<ExperimentRun>("/api/experiments/runs", {
+      method: "POST",
+      body: JSON.stringify({
+        project_id: selectedProjectId,
+        title: experimentTitle.trim(),
+        dataset: experimentDataset,
+        code_ref: experimentCodeRef,
+        command: experimentCommand,
+        metrics,
+        summary: experimentSummary
+      })
+    });
+    setExperimentTitle("");
+    setExperimentDataset("");
+    setExperimentCodeRef("");
+    setExperimentCommand("");
+    setExperimentMetrics('{"metric": 0}');
+    setExperimentSummary("");
+    await refreshResearch(selectedProjectId);
+    setStatus("Experiment run saved");
+  }
+
+  async function saveExperimentRunToResearch(run: ExperimentRun) {
+    if (!selectedProjectId) return;
+    await request<ResearchNote>(`/api/experiments/runs/${run.id}/research-note`, {
+      method: "POST",
+      body: JSON.stringify({ project_id: selectedProjectId, title: `Experiment: ${run.title}` })
+    });
+    await refreshResearch(selectedProjectId);
+    setStatus("Experiment run saved to research notes");
   }
 
   async function saveSelectedPassageToResearch() {
@@ -1123,6 +1189,61 @@ function App() {
                         <Quote size={15} /> Save selected passage
                       </button>
                     ) : null}
+                    <label className="field-label">
+                      Experiment title
+                      <input
+                        value={experimentTitle}
+                        onChange={(event) => setExperimentTitle(event.target.value)}
+                        placeholder="Attention baseline reproduction"
+                      />
+                    </label>
+                    <label className="field-label">
+                      Dataset
+                      <input
+                        value={experimentDataset}
+                        onChange={(event) => setExperimentDataset(event.target.value)}
+                        placeholder="WMT14 en-de"
+                      />
+                    </label>
+                    <label className="field-label">
+                      Code reference
+                      <input
+                        value={experimentCodeRef}
+                        onChange={(event) => setExperimentCodeRef(event.target.value)}
+                        placeholder="git:abc123 or path/to/commit"
+                      />
+                    </label>
+                    <label className="field-label">
+                      Command
+                      <textarea
+                        value={experimentCommand}
+                        onChange={(event) => setExperimentCommand(event.target.value)}
+                        placeholder="python train.py --config configs/baseline.yaml"
+                      />
+                    </label>
+                    <label className="field-label">
+                      Metrics JSON
+                      <textarea
+                        value={experimentMetrics}
+                        onChange={(event) => setExperimentMetrics(event.target.value)}
+                        placeholder='{"bleu": 29.1, "loss": 1.08}'
+                      />
+                    </label>
+                    <label className="field-label">
+                      Experiment summary
+                      <textarea
+                        value={experimentSummary}
+                        onChange={(event) => setExperimentSummary(event.target.value)}
+                        placeholder="What happened and what should change next?"
+                      />
+                    </label>
+                    <button
+                      className="primary wide"
+                      type="button"
+                      onClick={() => createExperimentRun().catch((err) => setError(String(err.message || err)))}
+                    >
+                      <Database size={16} /> Save experiment
+                    </button>
                     <div className="research-list">
                       <strong>Questions</strong>
                       {researchQuestions.length === 0 ? (
@@ -1133,6 +1254,39 @@ function App() {
                             <span>{item.status}</span>
                             <p>{item.question}</p>
                             {item.current_answer ? <small>{item.current_answer}</small> : null}
+                          </article>
+                        ))
+                      )}
+                    </div>
+                    <div className="research-list">
+                      <strong>Experiment runs</strong>
+                      {experimentRuns.length === 0 ? (
+                        <span>No experiment runs yet.</span>
+                      ) : (
+                        experimentRuns.map((run) => (
+                          <article key={run.id} className="research-row">
+                            <div className="research-row-title">
+                              <span>{run.status}</span>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  saveExperimentRunToResearch(run).catch((err) =>
+                                    setError(String(err.message || err))
+                                  )
+                                }
+                              >
+                                Save note
+                              </button>
+                            </div>
+                            <p>{run.title}</p>
+                            <small>{run.dataset || "No dataset"} · {run.artifact_count} artifacts</small>
+                            {Object.keys(run.metrics || {}).length > 0 ? (
+                              <small>
+                                {Object.entries(run.metrics)
+                                  .map(([key, value]) => `${key}: ${String(value)}`)
+                                  .join(", ")}
+                              </small>
+                            ) : null}
                           </article>
                         ))
                       )}

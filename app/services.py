@@ -57,6 +57,8 @@ LINK_TYPES = {
     "external_url",
 }
 LINK_RELATIONS = {"supports", "contradicts", "extends", "implements", "cites", "mentions", "questions"}
+EXPERIMENT_RUN_STATUSES = {"planned", "running", "completed", "failed", "archived"}
+EXPERIMENT_ARTIFACT_TYPES = {"metrics", "checkpoint", "figure", "table", "log", "model", "dataset", "report", "other"}
 
 
 def normalize_arxiv_id(source: str) -> str:
@@ -1497,9 +1499,196 @@ class PaperService:
         )
         return self.get_research_note(note["id"])
 
+    def create_experiment_run(self, payload: dict[str, Any]) -> dict[str, Any]:
+        project_id = int(payload.get("project_id") or 0)
+        self.get_research_project(project_id)
+        status = self._valid_choice(payload.get("status", "planned"), EXPERIMENT_RUN_STATUSES, "experiment status")
+        now = utcnow()
+        run_id = self.store.execute(
+            """
+            INSERT INTO experiment_runs
+                (project_id, title, status, hypothesis, dataset, code_ref, command,
+                 parameters_json, metrics_json, summary, started_at, completed_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                project_id,
+                clean_ws(str(payload.get("title") or "Untitled experiment run")),
+                status,
+                clean_ws(str(payload.get("hypothesis") or "")),
+                clean_ws(str(payload.get("dataset") or "")),
+                clean_ws(str(payload.get("code_ref") or "")),
+                str(payload.get("command") or ""),
+                dumps(payload.get("parameters") or {}),
+                dumps(payload.get("metrics") or {}),
+                str(payload.get("summary") or ""),
+                clean_ws(str(payload.get("started_at") or "")),
+                clean_ws(str(payload.get("completed_at") or "")),
+                now,
+                now,
+            ),
+        )
+        return self.get_experiment_run(run_id)
+
+    def list_experiment_runs(self, project_id: int | None = None, status: str = "") -> list[dict[str, Any]]:
+        clauses = []
+        values: list[Any] = []
+        if project_id:
+            clauses.append("project_id = ?")
+            values.append(project_id)
+        if status:
+            clauses.append("status = ?")
+            values.append(self._valid_choice(status, EXPERIMENT_RUN_STATUSES, "experiment status"))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self.store.query_all(
+            f"SELECT * FROM experiment_runs {where} ORDER BY updated_at DESC, id DESC",
+            tuple(values),
+        )
+        return [self._with_experiment_artifact_count(experiment_run_row(row)) for row in rows]
+
+    def get_experiment_run(self, run_id: int) -> dict[str, Any]:
+        row = self.store.query_one("SELECT * FROM experiment_runs WHERE id = ?", (run_id,))
+        if not row:
+            raise KeyError("experiment run not found")
+        return self._with_experiment_artifact_count(experiment_run_row(row))
+
+    def _with_experiment_artifact_count(self, run: dict[str, Any]) -> dict[str, Any]:
+        run["artifact_count"] = self.store.query_one(
+            "SELECT COUNT(*) AS count FROM experiment_artifacts WHERE run_id = ?",
+            (run["id"],),
+        )["count"]
+        return run
+
+    def update_experiment_run(self, run_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        self.get_experiment_run(run_id)
+        updates: list[str] = []
+        values: list[Any] = []
+        if "title" in payload:
+            updates.append("title = ?")
+            values.append(clean_ws(str(payload["title"])))
+        if "status" in payload:
+            updates.append("status = ?")
+            values.append(self._valid_choice(payload["status"], EXPERIMENT_RUN_STATUSES, "experiment status"))
+        if "hypothesis" in payload:
+            updates.append("hypothesis = ?")
+            values.append(clean_ws(str(payload["hypothesis"])))
+        if "dataset" in payload:
+            updates.append("dataset = ?")
+            values.append(clean_ws(str(payload["dataset"])))
+        if "code_ref" in payload:
+            updates.append("code_ref = ?")
+            values.append(clean_ws(str(payload["code_ref"])))
+        if "command" in payload:
+            updates.append("command = ?")
+            values.append(str(payload["command"]))
+        if "parameters" in payload:
+            updates.append("parameters_json = ?")
+            values.append(dumps(payload.get("parameters") or {}))
+        if "metrics" in payload:
+            updates.append("metrics_json = ?")
+            values.append(dumps(payload.get("metrics") or {}))
+        if "summary" in payload:
+            updates.append("summary = ?")
+            values.append(str(payload["summary"]))
+        if "started_at" in payload:
+            updates.append("started_at = ?")
+            values.append(clean_ws(str(payload["started_at"] or "")))
+        if "completed_at" in payload:
+            updates.append("completed_at = ?")
+            values.append(clean_ws(str(payload["completed_at"] or "")))
+        if updates:
+            updates.append("updated_at = ?")
+            values.append(utcnow())
+            values.append(run_id)
+            self.store.execute(f"UPDATE experiment_runs SET {', '.join(updates)} WHERE id = ?", tuple(values))
+        return self.get_experiment_run(run_id)
+
+    def create_experiment_artifact(self, run_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        self.get_experiment_run(run_id)
+        artifact_type = self._valid_choice(
+            payload.get("artifact_type", "other"),
+            EXPERIMENT_ARTIFACT_TYPES,
+            "experiment artifact type",
+        )
+        now = utcnow()
+        artifact_id = self.store.execute(
+            """
+            INSERT INTO experiment_artifacts
+                (run_id, artifact_type, uri, label, description, metadata_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                artifact_type,
+                str(payload.get("uri") or ""),
+                clean_ws(str(payload.get("label") or artifact_type)),
+                str(payload.get("description") or ""),
+                dumps(payload.get("metadata") or {}),
+                now,
+            ),
+        )
+        return self.get_experiment_artifact(artifact_id)
+
+    def experiment_run_artifacts(self, run_id: int) -> list[dict[str, Any]]:
+        self.get_experiment_run(run_id)
+        return [
+            experiment_artifact_row(row)
+            for row in self.store.query_all(
+                "SELECT * FROM experiment_artifacts WHERE run_id = ? ORDER BY id",
+                (run_id,),
+            )
+        ]
+
+    def get_experiment_artifact(self, artifact_id: int) -> dict[str, Any]:
+        row = self.store.query_one("SELECT * FROM experiment_artifacts WHERE id = ?", (artifact_id,))
+        if not row:
+            raise KeyError("experiment artifact not found")
+        return experiment_artifact_row(row)
+
+    def create_experiment_research_note(self, run_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        run = self.get_experiment_run(run_id)
+        project_id = int(payload.get("project_id") or run["project_id"])
+        if project_id != run["project_id"]:
+            raise ValueError("project_id must match experiment run project")
+        body = "\n".join(
+            [
+                f"Experiment run: {run['title']}",
+                f"Status: {run['status']}",
+                f"Dataset: {run['dataset'] or '(none)'}",
+                "",
+                "Hypothesis:",
+                run["hypothesis"] or "(none)",
+                "",
+                "Summary:",
+                run["summary"] or "(none)",
+            ]
+        )
+        note = self.create_research_note(
+            {
+                "project_id": project_id,
+                "title": payload.get("title") or f"Experiment run: {run['title']}",
+                "body_markdown": body,
+                "note_type": "experiment_note",
+                "tags": payload.get("tags", []),
+            }
+        )
+        self.create_research_link(
+            note["id"],
+            {
+                "link_type": "experiment_run",
+                "relation": "supports",
+                "target_id": str(run_id),
+                "label": run["title"],
+                "quote": run["summary"][:1200],
+                "metadata": {"run_id": run_id, "status": run["status"], "metrics": run["metrics"]},
+            },
+        )
+        return self.get_research_note(note["id"])
+
     def export_research_project(self, project_id: int) -> str:
         project = self.get_research_project(project_id)
         questions = self.list_research_questions(project_id=project_id)
+        experiment_runs = self.list_experiment_runs(project_id=project_id)
         notes = self.list_research_notes(project_id=project_id)
         lines = [
             f"# {project['title']}",
@@ -1524,6 +1713,42 @@ class PaperService:
                 lines.append(f"- [{question['status']}] {question['question']}{answer}")
         else:
             lines.append("(none)")
+        lines.extend(["", "## Experiment Runs", ""])
+        if not experiment_runs:
+            lines.append("(none)")
+        for run in experiment_runs:
+            lines.extend(
+                [
+                    f"### {run['title']}",
+                    "",
+                    f"- Status: {run['status']}",
+                    f"- Dataset: {run['dataset'] or '(none)'}",
+                    f"- Code: {run['code_ref'] or '(none)'}",
+                    "",
+                    "Hypothesis:",
+                    "",
+                    run["hypothesis"] or "(none)",
+                    "",
+                    "Command:",
+                    "",
+                    f"```bash\n{run['command']}\n```" if run["command"] else "(none)",
+                    "",
+                    "Metrics:",
+                ]
+            )
+            if run["metrics"]:
+                for key, value in run["metrics"].items():
+                    lines.append(f"- {key}: {value}")
+            else:
+                lines.append("(none)")
+            lines.extend(["", "Summary:", "", run["summary"] or "(none)", ""])
+            artifacts = self.experiment_run_artifacts(run["id"])
+            if artifacts:
+                lines.append("Artifacts:")
+                for artifact in artifacts:
+                    label = artifact["label"] or artifact["artifact_type"]
+                    lines.append(f"- {label}: {artifact['uri']}")
+                lines.append("")
         lines.extend(["", "## Notes", ""])
         if not notes:
             lines.append("(none)")
@@ -1550,6 +1775,13 @@ class PaperService:
             return f"[{paper['title']}{page_label}]"
         if link["link_type"] == "chat_message":
             return f"[Chat message {link['target_id']}]"
+        if link["link_type"] == "experiment_run":
+            run = self.get_experiment_run(int(link.get("target_id") or 0))
+            return f"[Experiment run: {run['title']}]"
+        if link["link_type"] == "experiment_artifact":
+            artifact = self.get_experiment_artifact(int(link.get("target_id") or 0))
+            label = artifact["label"] or artifact["artifact_type"]
+            return f"[Experiment artifact: {label}]"
         return f"[{link['label'] or link['target_uri'] or link['target_id']}]"
 
     def _valid_choice(self, value: Any, allowed: set[str], label: str) -> str:
@@ -1577,6 +1809,10 @@ class PaperService:
             row = self.store.query_one("SELECT id FROM chat_messages WHERE id = ?", (int(target_id or 0),))
             if not row:
                 raise KeyError("chat message not found")
+        if link_type == "experiment_run":
+            self.get_experiment_run(int(target_id or 0))
+        if link_type == "experiment_artifact":
+            self.get_experiment_artifact(int(target_id or 0))
 
     def _raise_key_error(self, message: str) -> None:
         raise KeyError(message)
@@ -1858,6 +2094,21 @@ def research_note_row(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def research_link_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **row,
+        "metadata": loads(row.get("metadata_json"), {}),
+    }
+
+
+def experiment_run_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **row,
+        "parameters": loads(row.get("parameters_json"), {}),
+        "metrics": loads(row.get("metrics_json"), {}),
+    }
+
+
+def experiment_artifact_row(row: dict[str, Any]) -> dict[str, Any]:
     return {
         **row,
         "metadata": loads(row.get("metadata_json"), {}),
