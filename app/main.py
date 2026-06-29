@@ -167,6 +167,23 @@ class ExperimentRunResearchNoteCreate(BaseModel):
     tags: list[str] = Field(default_factory=list)
 
 
+class ResearchDiscussionCreate(BaseModel):
+    project_id: int
+    title: str
+    status: str = "active"
+
+
+class ResearchDiscussionMessageCreate(BaseModel):
+    role: str = "user"
+    content: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class GroundingSnapshotCreate(BaseModel):
+    title: str = ""
+    discussion_message_id: int | None = None
+
+
 @lru_cache(maxsize=1)
 def service() -> PaperService:
     settings = get_settings()
@@ -571,6 +588,67 @@ def create_app() -> FastAPI:
             return await to_thread(service().create_experiment_research_note, run_id, payload.model_dump())
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+
+    @app.post("/api/research/discussions")
+    async def create_research_discussion(payload: ResearchDiscussionCreate) -> dict[str, Any]:
+        try:
+            return await to_thread(service().create_research_discussion, payload.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+
+    @app.get("/api/research/discussions")
+    async def list_research_discussions(
+        project_id: int | None = None,
+        status: str = "",
+    ) -> list[dict[str, Any]]:
+        try:
+            return await to_thread(service().list_research_discussions, project_id, status)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/research/discussions/{discussion_id}")
+    async def get_research_discussion(discussion_id: int) -> dict[str, Any]:
+        try:
+            return await to_thread(service().get_research_discussion, discussion_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+
+    @app.post("/api/research/discussions/{discussion_id}/messages")
+    async def create_research_discussion_message(
+        discussion_id: int,
+        payload: ResearchDiscussionMessageCreate,
+    ) -> dict[str, Any]:
+        try:
+            return await to_thread(service().create_research_discussion_message, discussion_id, payload.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+
+    @app.post("/api/research/projects/{project_id}/grounding-snapshots")
+    async def create_grounding_snapshot(project_id: int, payload: GroundingSnapshotCreate) -> dict[str, Any]:
+        try:
+            return await to_thread(service().create_grounding_snapshot, project_id, payload.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+
+    @app.get("/api/research/projects/{project_id}/grounding-snapshots")
+    async def list_grounding_snapshots(project_id: int) -> list[dict[str, Any]]:
+        try:
+            return await to_thread(service().list_grounding_snapshots, project_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+
+    @app.get("/api/research/grounding-snapshots/{snapshot_id}")
+    async def get_grounding_snapshot(snapshot_id: int) -> dict[str, Any]:
+        try:
+            return await to_thread(service().get_grounding_snapshot, snapshot_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
 

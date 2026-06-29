@@ -346,6 +346,51 @@ Fields:
 - `metadata_json`
 - `created_at`
 
+### ResearchDiscussion
+
+Project-level discussion thread for research reasoning.
+
+Fields:
+
+- `id`
+- `project_id`
+- `title`
+- `status`: `active`, `archived`
+- `created_at`
+- `updated_at`
+
+### ResearchDiscussionMessage
+
+Fields:
+
+- `id`
+- `discussion_id`
+- `project_id`
+- `role`: `user`, `assistant`, `system`
+- `content`
+- `metadata_json`
+- `created_at`
+
+### GroundingSnapshot
+
+Frozen Markdown context for a project-level discussion.
+
+Fields:
+
+- `id`
+- `project_id`
+- `discussion_message_id`
+- `title`
+- `content_markdown`
+- `metadata_json`
+- `created_at`
+
+Constraints:
+
+- Snapshot content must be immutable once created.
+- Snapshot metadata records counts for questions, notes, and experiment runs so
+  downstream review can detect missing context.
+
 ## API Surface
 
 ### Paper APIs
@@ -424,6 +469,16 @@ Fields:
 - `POST /api/experiments/runs/{run_id}/research-note`
 - `POST /api/experiments/runs/{run_id}/artifacts`
 - `GET /api/experiments/runs/{run_id}/artifacts`
+
+### Research Discussion APIs
+
+- `POST /api/research/discussions`
+- `GET /api/research/discussions`
+- `GET /api/research/discussions/{discussion_id}`
+- `POST /api/research/discussions/{discussion_id}/messages`
+- `POST /api/research/projects/{project_id}/grounding-snapshots`
+- `GET /api/research/projects/{project_id}/grounding-snapshots`
+- `GET /api/research/grounding-snapshots/{snapshot_id}`
 
 ### GitHub APIs
 
@@ -589,6 +644,8 @@ MVP implementation should include:
   project export.
 - Integration tests for experiment runs, artifact references, experiment
   evidence links, run-to-note capture, and project export.
+- Integration tests for research discussions, discussion messages, grounding
+  snapshots, and discussion/snapshot export.
 - End-to-end test for the main flow:
   - configure provider
   - ingest paper

@@ -217,6 +217,35 @@ class Store:
                     created_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS research_discussions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                    title TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS research_discussion_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    discussion_id INTEGER NOT NULL REFERENCES research_discussions(id) ON DELETE CASCADE,
+                    project_id INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL DEFAULT '',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS grounding_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                    discussion_message_id INTEGER,
+                    title TEXT NOT NULL,
+                    content_markdown TEXT NOT NULL DEFAULT '',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS research_links (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     project_id INTEGER REFERENCES research_projects(id) ON DELETE CASCADE,

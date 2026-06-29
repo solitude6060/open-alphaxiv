@@ -59,6 +59,8 @@ LINK_TYPES = {
 LINK_RELATIONS = {"supports", "contradicts", "extends", "implements", "cites", "mentions", "questions"}
 EXPERIMENT_RUN_STATUSES = {"planned", "running", "completed", "failed", "archived"}
 EXPERIMENT_ARTIFACT_TYPES = {"metrics", "checkpoint", "figure", "table", "log", "model", "dataset", "report", "other"}
+DISCUSSION_STATUSES = {"active", "archived"}
+DISCUSSION_MESSAGE_ROLES = {"user", "assistant", "system"}
 
 
 def normalize_arxiv_id(source: str) -> str:
@@ -1685,10 +1687,231 @@ class PaperService:
         )
         return self.get_research_note(note["id"])
 
+    def create_research_discussion(self, payload: dict[str, Any]) -> dict[str, Any]:
+        project_id = int(payload.get("project_id") or 0)
+        self.get_research_project(project_id)
+        status = self._valid_choice(payload.get("status", "active"), DISCUSSION_STATUSES, "discussion status")
+        now = utcnow()
+        discussion_id = self.store.execute(
+            """
+            INSERT INTO research_discussions (project_id, title, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                project_id,
+                clean_ws(str(payload.get("title") or "Research discussion")),
+                status,
+                now,
+                now,
+            ),
+        )
+        return self.get_research_discussion(discussion_id)
+
+    def list_research_discussions(
+        self,
+        project_id: int | None = None,
+        status: str = "",
+    ) -> list[dict[str, Any]]:
+        clauses = []
+        values: list[Any] = []
+        if project_id:
+            clauses.append("project_id = ?")
+            values.append(project_id)
+        if status:
+            clauses.append("status = ?")
+            values.append(self._valid_choice(status, DISCUSSION_STATUSES, "discussion status"))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self.store.query_all(
+            f"SELECT * FROM research_discussions {where} ORDER BY updated_at DESC, id DESC",
+            tuple(values),
+        )
+        return [self._with_discussion_message_count(research_discussion_row(row)) for row in rows]
+
+    def get_research_discussion(self, discussion_id: int) -> dict[str, Any]:
+        row = self.store.query_one("SELECT * FROM research_discussions WHERE id = ?", (discussion_id,))
+        if not row:
+            raise KeyError("research discussion not found")
+        discussion = self._with_discussion_message_count(research_discussion_row(row))
+        discussion["messages"] = self.research_discussion_messages(discussion_id)
+        return discussion
+
+    def _with_discussion_message_count(self, discussion: dict[str, Any]) -> dict[str, Any]:
+        discussion["message_count"] = self.store.query_one(
+            "SELECT COUNT(*) AS count FROM research_discussion_messages WHERE discussion_id = ?",
+            (discussion["id"],),
+        )["count"]
+        return discussion
+
+    def create_research_discussion_message(self, discussion_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        discussion = self.get_research_discussion(discussion_id)
+        role = self._valid_choice(payload.get("role", "user"), DISCUSSION_MESSAGE_ROLES, "discussion message role")
+        message_id = self.store.execute(
+            """
+            INSERT INTO research_discussion_messages
+                (discussion_id, project_id, role, content, metadata_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                discussion_id,
+                discussion["project_id"],
+                role,
+                str(payload.get("content") or ""),
+                dumps(payload.get("metadata") or {}),
+                utcnow(),
+            ),
+        )
+        return self.get_research_discussion_message(message_id)
+
+    def research_discussion_messages(self, discussion_id: int) -> list[dict[str, Any]]:
+        self.store.query_one("SELECT id FROM research_discussions WHERE id = ?", (discussion_id,)) or self._raise_key_error(
+            "research discussion not found"
+        )
+        return [
+            research_discussion_message_row(row)
+            for row in self.store.query_all(
+                "SELECT * FROM research_discussion_messages WHERE discussion_id = ? ORDER BY id",
+                (discussion_id,),
+            )
+        ]
+
+    def get_research_discussion_message(self, message_id: int) -> dict[str, Any]:
+        row = self.store.query_one("SELECT * FROM research_discussion_messages WHERE id = ?", (message_id,))
+        if not row:
+            raise KeyError("research discussion message not found")
+        return research_discussion_message_row(row)
+
+    def create_discussion_research_link(self, message_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        message = self.get_research_discussion_message(message_id)
+        link_type = self._valid_choice(payload.get("link_type"), LINK_TYPES, "link type")
+        relation = self._valid_choice(payload.get("relation"), LINK_RELATIONS, "link relation")
+        metadata = payload.get("metadata") or {}
+        target_id = str(payload.get("target_id") or metadata.get("paper_id") or "")
+        self._validate_research_link_target(link_type, target_id, metadata)
+        link_id = self.store.execute(
+            """
+            INSERT INTO research_links
+                (project_id, note_id, discussion_message_id, link_type, relation, target_id,
+                 target_uri, label, quote, metadata_json, created_at)
+            VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                message["project_id"],
+                message_id,
+                link_type,
+                relation,
+                target_id,
+                str(payload.get("target_uri") or ""),
+                clean_ws(str(payload.get("label") or "")),
+                str(payload.get("quote") or ""),
+                dumps(metadata),
+                utcnow(),
+            ),
+        )
+        return self.get_research_link(link_id)
+
+    def create_grounding_snapshot(self, project_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        project = self.get_research_project(project_id)
+        discussion_message_id = payload.get("discussion_message_id")
+        if discussion_message_id:
+            message = self.get_research_discussion_message(int(discussion_message_id))
+            if message["project_id"] != project_id:
+                raise ValueError("discussion_message_id must belong to the project")
+        content, metadata = self.build_grounding_snapshot_content(project_id)
+        snapshot_id = self.store.execute(
+            """
+            INSERT INTO grounding_snapshots
+                (project_id, discussion_message_id, title, content_markdown, metadata_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                project_id,
+                int(discussion_message_id) if discussion_message_id else None,
+                clean_ws(str(payload.get("title") or f"Grounding snapshot for {project['title']}")),
+                content,
+                dumps(metadata),
+                utcnow(),
+            ),
+        )
+        return self.get_grounding_snapshot(snapshot_id)
+
+    def build_grounding_snapshot_content(self, project_id: int) -> tuple[str, dict[str, Any]]:
+        project = self.get_research_project(project_id)
+        questions = self.list_research_questions(project_id=project_id)
+        notes = self.list_research_notes(project_id=project_id)
+        experiment_runs = self.list_experiment_runs(project_id=project_id)
+        lines = [
+            f"# Grounding Snapshot: {project['title']}",
+            "",
+            "## Project State",
+            "",
+            f"- Goal: {project['goal'] or '(none)'}",
+            f"- Current state: {project['current_state'] or '(none)'}",
+            "",
+            "## Questions",
+            "",
+        ]
+        if questions:
+            for question in questions:
+                lines.append(f"- [{question['status']}] {question['question']}")
+        else:
+            lines.append("(none)")
+        lines.extend(["", "## Notes And Evidence", ""])
+        if notes:
+            for note in notes:
+                lines.extend([f"### {note['title']}", "", note["body_markdown"] or "(empty)", ""])
+                for link in note.get("links", []):
+                    lines.append(f"- Evidence: {self.format_research_link_citation(link)}")
+                lines.append("")
+        else:
+            lines.append("(none)")
+        lines.extend(["", "## Experiment Runs", ""])
+        if experiment_runs:
+            for run in experiment_runs:
+                lines.extend(
+                    [
+                        f"### {run['title']}",
+                        "",
+                        f"- Status: {run['status']}",
+                        f"- Dataset: {run['dataset'] or '(none)'}",
+                        f"- Summary: {run['summary'] or '(none)'}",
+                    ]
+                )
+                if run["metrics"]:
+                    for key, value in run["metrics"].items():
+                        lines.append(f"- {key}: {value}")
+                artifacts = self.experiment_run_artifacts(run["id"])
+                for artifact in artifacts:
+                    lines.append(f"- Artifact: {artifact['label'] or artifact['artifact_type']} ({artifact['uri']})")
+                lines.append("")
+        else:
+            lines.append("(none)")
+        metadata = {
+            "question_count": len(questions),
+            "note_count": len(notes),
+            "experiment_run_count": len(experiment_runs),
+        }
+        return "\n".join(lines).strip() + "\n", metadata
+
+    def list_grounding_snapshots(self, project_id: int) -> list[dict[str, Any]]:
+        self.get_research_project(project_id)
+        rows = self.store.query_all(
+            "SELECT * FROM grounding_snapshots WHERE project_id = ? ORDER BY id DESC",
+            (project_id,),
+        )
+        return [grounding_snapshot_row(row) for row in rows]
+
+    def get_grounding_snapshot(self, snapshot_id: int) -> dict[str, Any]:
+        row = self.store.query_one("SELECT * FROM grounding_snapshots WHERE id = ?", (snapshot_id,))
+        if not row:
+            raise KeyError("grounding snapshot not found")
+        return grounding_snapshot_row(row)
+
     def export_research_project(self, project_id: int) -> str:
         project = self.get_research_project(project_id)
         questions = self.list_research_questions(project_id=project_id)
         experiment_runs = self.list_experiment_runs(project_id=project_id)
+        discussions = self.list_research_discussions(project_id=project_id)
+        snapshots = self.list_grounding_snapshots(project_id)
         notes = self.list_research_notes(project_id=project_id)
         lines = [
             f"# {project['title']}",
@@ -1749,6 +1972,19 @@ class PaperService:
                     label = artifact["label"] or artifact["artifact_type"]
                     lines.append(f"- {label}: {artifact['uri']}")
                 lines.append("")
+        lines.extend(["", "## Discussions", ""])
+        if not discussions:
+            lines.append("(none)")
+        for discussion in discussions:
+            lines.extend([f"### {discussion['title']}", "", f"- Status: {discussion['status']}", ""])
+            full_discussion = self.get_research_discussion(discussion["id"])
+            for message in full_discussion.get("messages", []):
+                lines.extend([f"**{message['role']}**", "", message["content"] or "(empty)", ""])
+        lines.extend(["", "## Grounding Snapshots", ""])
+        if not snapshots:
+            lines.append("(none)")
+        for snapshot in snapshots:
+            lines.extend([f"### {snapshot['title']}", "", snapshot["content_markdown"], ""])
         lines.extend(["", "## Notes", ""])
         if not notes:
             lines.append("(none)")
@@ -2109,6 +2345,24 @@ def experiment_run_row(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def experiment_artifact_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **row,
+        "metadata": loads(row.get("metadata_json"), {}),
+    }
+
+
+def research_discussion_row(row: dict[str, Any]) -> dict[str, Any]:
+    return dict(row)
+
+
+def research_discussion_message_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **row,
+        "metadata": loads(row.get("metadata_json"), {}),
+    }
+
+
+def grounding_snapshot_row(row: dict[str, Any]) -> dict[str, Any]:
     return {
         **row,
         "metadata": loads(row.get("metadata_json"), {}),
