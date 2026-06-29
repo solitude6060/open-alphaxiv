@@ -265,6 +265,7 @@ a {
 .topbar-actions,
 .health,
 .quiet-button,
+.inline-icon-button,
 .ingest-bar,
 .tool-heading,
 .section-title-row,
@@ -272,7 +273,9 @@ a {
 .status-line,
 .auth-modes,
 .prompt-applied,
-.selected-image-card {
+.selected-image-card,
+.research-actions,
+.research-row-title {
   display: flex;
   align-items: center;
 }
@@ -286,6 +289,7 @@ a {
 .brand-mark svg,
 .health svg,
 .quiet-button svg,
+.inline-icon-button svg,
 .ingest-bar svg,
 .tool-heading svg,
 .tool-tabs svg,
@@ -1210,6 +1214,103 @@ textarea {
 .mode-switch button:disabled {
   cursor: not-allowed;
   color: #9aaab0;
+}
+
+.wide-button {
+  width: 100%;
+  justify-content: center;
+}
+
+.inline-icon-button {
+  width: 28px;
+  height: 28px;
+  justify-content: center;
+  border: 1px solid #d5e0e3;
+  border-radius: 6px;
+  background: #fff;
+  color: #2d5966;
+}
+
+.inline-icon-button:hover {
+  border-color: #2d7d6f;
+  color: #1f5e55;
+}
+
+.research-create-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 38px;
+  gap: 8px;
+}
+
+.research-create-row button {
+  min-width: 38px;
+  padding: 0;
+  justify-content: center;
+}
+
+.research-actions {
+  gap: 8px;
+}
+
+.research-actions .quiet-button {
+  min-height: 34px;
+}
+
+.research-list {
+  display: grid;
+  gap: 8px;
+  padding-top: 6px;
+}
+
+.research-list > strong {
+  color: #203038;
+  font-size: 13px;
+}
+
+.research-list > span {
+  color: #6b7f86;
+  font-size: 12px;
+}
+
+.research-row {
+  border: 1px solid #dbe3e6;
+  border-radius: 6px;
+  padding: 10px;
+  display: grid;
+  gap: 6px;
+  background: #fff;
+}
+
+.research-row p {
+  margin: 0;
+  color: #203038;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.research-row span,
+.research-row small {
+  color: #62777e;
+  font-size: 12px;
+}
+
+.research-row-title {
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.research-row-title button {
+  min-height: 28px;
+  padding: 0 9px;
+  border: 1px solid #d5e0e3;
+  border-radius: 6px;
+  background: #f8fbfc;
+  color: #526870;
+  font-size: 12px;
+}
+
+.compact-providers {
+  padding-top: 6px;
 }
 
 .provider-list,

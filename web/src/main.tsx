@@ -29,7 +29,8 @@ import {
 } from "lucide-react";
 import "./styles.css";
 
-const API_URL = import.meta.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API_URL =
+  import.meta.env.VITE_API_URL || import.meta.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const CODEX_SYSTEM_PROMPT_STORAGE_KEY = "open-alphaxiv.codexSystemPrompt";
 const CODEX_PROMPT_PRESETS = [
   {
@@ -192,6 +193,46 @@ type CodexStatus = {
   integration_boundary: string;
 };
 
+type ResearchProject = {
+  id: number;
+  title: string;
+  slug: string;
+  status: string;
+  goal: string;
+  current_state: string;
+  note_count?: number;
+  question_count?: number;
+};
+
+type ResearchQuestion = {
+  id: number;
+  project_id: number;
+  question: string;
+  status: string;
+  current_answer: string;
+};
+
+type ResearchLink = {
+  id: number;
+  link_type: string;
+  relation: string;
+  target_id: string;
+  label: string;
+  quote: string;
+  metadata: Record<string, unknown>;
+};
+
+type ResearchNote = {
+  id: number;
+  project_id: number;
+  title: string;
+  body_markdown: string;
+  note_type: string;
+  status: string;
+  tags: string[];
+  links: ResearchLink[];
+};
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, {
     ...options,
@@ -224,6 +265,7 @@ function App() {
     return window.localStorage.getItem(CODEX_SYSTEM_PROMPT_STORAGE_KEY) || "";
   });
   const [selectedText, setSelectedText] = useState("");
+  const [selectedTextPage, setSelectedTextPage] = useState<number | null>(null);
   const [selectedImage, setSelectedImage] = useState<ImageSelection | null>(null);
   const [imageDrag, setImageDrag] = useState<ImageDrag | null>(null);
   const [pages, setPages] = useState<PaperPage[]>([]);
@@ -236,12 +278,26 @@ function App() {
   const [graph, setGraph] = useState<{ nodes: GraphNode[]; edges: GraphEdge[] } | null>(null);
   const [activeTool, setActiveTool] = useState<"assistant" | "notes" | "similar" | "codex">("assistant");
   const [codexStatus, setCodexStatus] = useState<CodexStatus | null>(null);
+  const [researchProjects, setResearchProjects] = useState<ResearchProject[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<number | null>(null);
+  const [researchQuestions, setResearchQuestions] = useState<ResearchQuestion[]>([]);
+  const [researchNotes, setResearchNotes] = useState<ResearchNote[]>([]);
+  const [projectTitle, setProjectTitle] = useState("New research project");
+  const [projectGoal, setProjectGoal] = useState("");
+  const [projectCurrentState, setProjectCurrentState] = useState("");
+  const [researchQuestion, setResearchQuestion] = useState("");
+  const [noteTitle, setNoteTitle] = useState("");
+  const [noteBody, setNoteBody] = useState("");
   const [status, setStatus] = useState("Loading local workspace");
   const [error, setError] = useState("");
 
   const selectedPaper = useMemo(
     () => papers.find((paper) => paper.id === selectedPaperId) || papers[0],
     [papers, selectedPaperId]
+  );
+  const selectedProject = useMemo(
+    () => researchProjects.find((project) => project.id === selectedProjectId) || null,
+    [researchProjects, selectedProjectId]
   );
 
   async function refresh() {
@@ -264,8 +320,26 @@ function App() {
     setStatus("Ready");
   }
 
+  async function refreshResearch(preferredProjectId?: number) {
+    const projects = await request<ResearchProject[]>("/api/research/projects");
+    setResearchProjects(projects);
+    const nextProjectId = preferredProjectId || selectedProjectId || projects[0]?.id || null;
+    setSelectedProjectId(nextProjectId);
+    if (!nextProjectId) {
+      setResearchQuestions([]);
+      setResearchNotes([]);
+      return;
+    }
+    const [questions, notes] = await Promise.all([
+      request<ResearchQuestion[]>(`/api/research/questions?project_id=${nextProjectId}`),
+      request<ResearchNote[]>(`/api/research/notes?project_id=${nextProjectId}`)
+    ]);
+    setResearchQuestions(questions);
+    setResearchNotes(notes);
+  }
+
   useEffect(() => {
-    refresh().catch((err) => {
+    Promise.all([refresh(), refreshResearch()]).catch((err) => {
       setError(String(err.message || err));
       setStatus("API unavailable");
     });
@@ -279,6 +353,7 @@ function App() {
 
   useEffect(() => {
     setSelectedText("");
+    setSelectedTextPage(null);
     setSelectedImage(null);
     setActiveSessionId(null);
     setChatMessages([]);
@@ -290,6 +365,17 @@ function App() {
   useEffect(() => {
     window.localStorage.setItem(CODEX_SYSTEM_PROMPT_STORAGE_KEY, codexSystemPrompt);
   }, [codexSystemPrompt]);
+
+  useEffect(() => {
+    if (selectedProjectId) {
+      refreshResearch(selectedProjectId).catch((err) => setError(String(err.message || err)));
+    }
+  }, [selectedProjectId]);
+
+  useEffect(() => {
+    setProjectGoal(selectedProject?.goal || "");
+    setProjectCurrentState(selectedProject?.current_state || "");
+  }, [selectedProject?.id, selectedProject?.goal, selectedProject?.current_state]);
 
   async function createMockProvider() {
     setError("");
@@ -451,6 +537,100 @@ function App() {
     await refresh();
   }
 
+  async function createResearchProject() {
+    const title = projectTitle.trim();
+    if (!title) return;
+    const project = await request<ResearchProject>("/api/research/projects", {
+      method: "POST",
+      body: JSON.stringify({ title, goal: "Track paper evidence and research progress." })
+    });
+    setProjectTitle("New research project");
+    await refreshResearch(project.id);
+  }
+
+  async function addResearchQuestion() {
+    if (!selectedProjectId || !researchQuestion.trim()) return;
+    await request<ResearchQuestion>("/api/research/questions", {
+      method: "POST",
+      body: JSON.stringify({ project_id: selectedProjectId, question: researchQuestion.trim() })
+    });
+    setResearchQuestion("");
+    await refreshResearch(selectedProjectId);
+  }
+
+  async function saveProjectState() {
+    if (!selectedProjectId) return;
+    await request<ResearchProject>(`/api/research/projects/${selectedProjectId}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        goal: projectGoal,
+        current_state: projectCurrentState
+      })
+    });
+    await refreshResearch(selectedProjectId);
+    setStatus("Research project state saved");
+  }
+
+  async function saveManualResearchNote() {
+    if (!selectedProjectId || !noteTitle.trim()) return;
+    await request<ResearchNote>("/api/research/notes", {
+      method: "POST",
+      body: JSON.stringify({
+        project_id: selectedProjectId,
+        title: noteTitle.trim(),
+        body_markdown: noteBody,
+        note_type: "idea",
+        tags: []
+      })
+    });
+    setNoteTitle("");
+    setNoteBody("");
+    await refreshResearch(selectedProjectId);
+  }
+
+  async function saveSelectedPassageToResearch() {
+    if (!selectedPaper || !selectedProjectId || !selectedText.trim()) return;
+    await request<ResearchNote>(`/api/papers/${selectedPaper.id}/research-notes`, {
+      method: "POST",
+      body: JSON.stringify({
+        project_id: selectedProjectId,
+        title: `Passage from ${selectedPaper.title}`,
+        selected_text: selectedText,
+        page_number: selectedTextPage
+      })
+    });
+    await refreshResearch(selectedProjectId);
+    setStatus("Passage saved to research notes");
+  }
+
+  async function saveAssistantMessageToResearch(message: ChatMessage) {
+    if (!selectedProjectId) return;
+    await request<ResearchNote>(`/api/chat/messages/${message.id}/research-note`, {
+      method: "POST",
+      body: JSON.stringify({ project_id: selectedProjectId, title: `Answer: ${message.content.slice(0, 48)}` })
+    });
+    await refreshResearch(selectedProjectId);
+    setStatus("Assistant answer saved to research notes");
+  }
+
+  async function archiveResearchNote(noteId: number) {
+    if (!selectedProjectId) return;
+    await request<ResearchNote>(`/api/research/notes/${noteId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "archived" })
+    });
+    await refreshResearch(selectedProjectId);
+  }
+
+  async function archiveResearchProject() {
+    if (!selectedProjectId) return;
+    await request<ResearchProject>(`/api/research/projects/${selectedProjectId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "archived" })
+    });
+    await refreshResearch(selectedProjectId);
+  }
+
   function captureSelection(event: React.MouseEvent<HTMLElement>) {
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0) return;
@@ -458,7 +638,14 @@ function App() {
     if (!event.currentTarget.contains(range.commonAncestorContainer)) return;
     const text = selection.toString().replace(/\s+/g, " ").trim();
     if (text.length >= 8) {
+      const container =
+        range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
+          ? (range.commonAncestorContainer as Element)
+          : range.commonAncestorContainer.parentElement;
+      const pageElement = container?.closest<HTMLElement>("[data-page-number]");
+      const pageNumber = Number(pageElement?.dataset.pageNumber || "");
       setSelectedText(text.slice(0, 1800));
+      setSelectedTextPage(Number.isFinite(pageNumber) ? pageNumber : null);
       setActiveTool("assistant");
     }
   }
@@ -644,7 +831,7 @@ function App() {
                     const box = imageSelectionBox(page.page_number);
                     const textLayer = pageTextLayers[page.page_number];
                     return (
-                      <article className="pdf-page-card" key={page.page_number}>
+                      <article className="pdf-page-card" key={page.page_number} data-page-number={page.page_number}>
                         <div className="page-label">Page {page.page_number}</div>
                         <div
                           className={`page-frame ${selectionMode === "area" ? "area-mode" : "text-mode"}`}
@@ -784,8 +971,15 @@ function App() {
                 {selectedText ? (
                   <div className="selected-quote">
                     <Quote size={15} />
-                    <p>{selectedText}</p>
-                    <button onClick={() => setSelectedText("")}>Clear</button>
+                    <p>{selectedTextPage ? `Page ${selectedTextPage}: ` : ""}{selectedText}</p>
+                    <button
+                      onClick={() => {
+                        setSelectedText("");
+                        setSelectedTextPage(null);
+                      }}
+                    >
+                      Clear
+                    </button>
                   </div>
                 ) : null}
                 {selectedImage ? (
@@ -819,6 +1013,20 @@ function App() {
                               {message.metadata.context_scope === "whole_paper" ? " / whole paper" : ""}
                             </span>
                           ) : null}
+                          {message.role === "assistant" && selectedProjectId ? (
+                            <button
+                              className="inline-icon-button"
+                              type="button"
+                              onClick={() =>
+                                saveAssistantMessageToResearch(message).catch((err) =>
+                                  setError(String(err.message || err))
+                                )
+                              }
+                              title="Save answer to research notes"
+                            >
+                              <Clipboard size={13} />
+                            </button>
+                          ) : null}
                         </div>
                         {message.role === "assistant" ? (
                           <MarkdownAnswer markdown={message.content} />
@@ -843,16 +1051,178 @@ function App() {
             {activeTool === "notes" ? (
               <section className="tool-section">
                 <div className="tool-heading">
-                  <h2><Tags size={18} /> Notes</h2>
+                  <h2><Tags size={18} /> Research</h2>
+                  <span>{researchProjects.length} projects</span>
                 </div>
+                <div className="research-create-row">
+                  <input
+                    value={projectTitle}
+                    onChange={(event) => setProjectTitle(event.target.value)}
+                    aria-label="Research project title"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => createResearchProject().catch((err) => setError(String(err.message || err)))}
+                    title="Create research project"
+                  >
+                    <Plus size={15} />
+                  </button>
+                </div>
+                {researchProjects.length > 0 ? (
+                  <select
+                    value={selectedProjectId || ""}
+                    onChange={(event) => setSelectedProjectId(Number(event.target.value) || null)}
+                    aria-label="Research project"
+                  >
+                    {researchProjects.map((project) => (
+                      <option key={project.id} value={project.id}>
+                        {project.title} · {project.status}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <div className="conversation-empty">Create a project to start persistent research notes.</div>
+                )}
+                {selectedProjectId ? (
+                  <div className="research-actions">
+                    <a
+                      className="quiet-button"
+                      href={`${API_URL}/api/research/projects/${selectedProjectId}/export.md`}
+                    >
+                      <Download size={14} /> Export
+                    </a>
+                    <button
+                      className="quiet-button"
+                      type="button"
+                      onClick={() => archiveResearchProject().catch((err) => setError(String(err.message || err)))}
+                    >
+                      Archive project
+                    </button>
+                  </div>
+                ) : null}
+                {selectedProjectId ? (
+                  <>
+                    <label className="field-label">
+                      Project goal
+                      <textarea
+                        value={projectGoal}
+                        onChange={(event) => setProjectGoal(event.target.value)}
+                        placeholder="What does this research direction need to answer?"
+                      />
+                    </label>
+                    <label className="field-label">
+                      Current state
+                      <textarea
+                        value={projectCurrentState}
+                        onChange={(event) => setProjectCurrentState(event.target.value)}
+                        placeholder="What is known, blocked, or next?"
+                      />
+                    </label>
+                    <button
+                      className="quiet-button wide-button"
+                      type="button"
+                      onClick={() => saveProjectState().catch((err) => setError(String(err.message || err)))}
+                    >
+                      <Clipboard size={15} /> Save project state
+                    </button>
+                    <label className="field-label">
+                      Research question
+                      <input
+                        value={researchQuestion}
+                        onChange={(event) => setResearchQuestion(event.target.value)}
+                        placeholder="What are we trying to learn?"
+                      />
+                    </label>
+                    <button
+                      className="primary wide"
+                      type="button"
+                      onClick={() => addResearchQuestion().catch((err) => setError(String(err.message || err)))}
+                    >
+                      <Plus size={16} /> Add question
+                    </button>
+                    <label className="field-label">
+                      Note title
+                      <input
+                        value={noteTitle}
+                        onChange={(event) => setNoteTitle(event.target.value)}
+                        placeholder="Research note title"
+                      />
+                    </label>
+                    <textarea
+                      value={noteBody}
+                      onChange={(event) => setNoteBody(event.target.value)}
+                      placeholder="Write a Markdown research note..."
+                    />
+                    <button
+                      className="primary wide"
+                      type="button"
+                      onClick={() => saveManualResearchNote().catch((err) => setError(String(err.message || err)))}
+                    >
+                      <Clipboard size={16} /> Save note
+                    </button>
+                    {selectedText ? (
+                      <button
+                        className="quiet-button wide-button"
+                        type="button"
+                        onClick={() =>
+                          saveSelectedPassageToResearch().catch((err) => setError(String(err.message || err)))
+                        }
+                      >
+                        <Quote size={15} /> Save selected passage
+                      </button>
+                    ) : null}
+                    <div className="research-list">
+                      <strong>Questions</strong>
+                      {researchQuestions.length === 0 ? (
+                        <span>No questions yet.</span>
+                      ) : (
+                        researchQuestions.map((item) => (
+                          <article key={item.id} className="research-row">
+                            <span>{item.status}</span>
+                            <p>{item.question}</p>
+                            {item.current_answer ? <small>{item.current_answer}</small> : null}
+                          </article>
+                        ))
+                      )}
+                    </div>
+                    <div className="research-list">
+                      <strong>Notes</strong>
+                      {researchNotes.length === 0 ? (
+                        <span>No notes yet.</span>
+                      ) : (
+                        researchNotes.map((note) => (
+                          <article key={note.id} className="research-row">
+                            <div className="research-row-title">
+                              <span>{note.note_type}</span>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  archiveResearchNote(note.id).catch((err) => setError(String(err.message || err)))
+                                }
+                              >
+                                Archive
+                              </button>
+                            </div>
+                            <p>{note.title}</p>
+                            {note.links.length > 0 ? (
+                              <small>
+                                {note.links.map((link) => link.label || link.link_type).join(", ")}
+                              </small>
+                            ) : null}
+                          </article>
+                        ))
+                      )}
+                    </div>
+                  </>
+                ) : null}
                 <label className="field-label">
-                  Tags
+                  Paper tags
                   <input
                     defaultValue={selectedPaper.tags.join(", ")}
                     onBlur={(event) => saveTags(event.target.value)}
                   />
                 </label>
-                <div className="provider-list">
+                <div className="provider-list compact-providers">
                   {providers.map((provider) => (
                     <div className="provider-row" key={provider.id}>
                       <strong>{provider.name}</strong>

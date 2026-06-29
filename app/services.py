@@ -44,6 +44,21 @@ STOPWORDS = {
     "their",
 }
 MAX_UPLOAD_PDF_BYTES = 50_000_000
+PROJECT_STATUSES = {"active", "paused", "completed", "archived"}
+QUESTION_STATUSES = {"open", "investigating", "answered", "abandoned"}
+NOTE_STATUSES = {"draft", "active", "resolved", "archived"}
+NOTE_TYPES = {"idea", "question", "summary", "experiment_note", "decision", "todo", "meeting", "literature_note"}
+LINK_TYPES = {
+    "paper",
+    "paper_passage",
+    "paper_region",
+    "chat_message",
+    "code_path",
+    "experiment_run",
+    "experiment_artifact",
+    "external_url",
+}
+LINK_RELATIONS = {"supports", "contradicts", "extends", "implements", "cites", "mentions", "questions"}
 
 
 def normalize_arxiv_id(source: str) -> str:
@@ -119,6 +134,11 @@ def _xml_text(xml: str, tag: str) -> str:
 
 def clean_ws(text: str) -> str:
     return re.sub(r"\s+", " ", text.replace("&amp;", "&")).strip()
+
+
+def slugify(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug or "research-project"
 
 
 def build_markdown(meta: dict[str, Any], source_label: str, full_text: str = "") -> str:
@@ -1250,6 +1270,436 @@ class PaperService:
             lines.append(f"- [{node['group']}] {node['title']} ({node['year']})")
         return "\n".join(lines).strip() + "\n"
 
+    def create_research_project(self, payload: dict[str, Any]) -> dict[str, Any]:
+        title = clean_ws(str(payload.get("title") or "Untitled research project"))
+        status = self._valid_choice(payload.get("status", "active"), PROJECT_STATUSES, "project status")
+        now = utcnow()
+        project_id = self.store.execute(
+            """
+            INSERT INTO research_projects (title, slug, status, goal, current_state, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                title,
+                self._unique_project_slug(str(payload.get("slug") or title)),
+                status,
+                clean_ws(str(payload.get("goal") or "")),
+                clean_ws(str(payload.get("current_state") or "")),
+                now,
+                now,
+            ),
+        )
+        return self.get_research_project(project_id)
+
+    def list_research_projects(self, status: str = "") -> list[dict[str, Any]]:
+        if status:
+            rows = self.store.query_all(
+                "SELECT * FROM research_projects WHERE status = ? ORDER BY updated_at DESC, id DESC",
+                (status,),
+            )
+        else:
+            rows = self.store.query_all("SELECT * FROM research_projects ORDER BY updated_at DESC, id DESC")
+        return [research_project_row(row) for row in rows]
+
+    def get_research_project(self, project_id: int) -> dict[str, Any]:
+        row = self.store.query_one("SELECT * FROM research_projects WHERE id = ?", (project_id,))
+        if not row:
+            raise KeyError("research project not found")
+        project = research_project_row(row)
+        project["note_count"] = self.store.query_one(
+            "SELECT COUNT(*) AS count FROM research_notes WHERE project_id = ?", (project_id,)
+        )["count"]
+        project["question_count"] = self.store.query_one(
+            "SELECT COUNT(*) AS count FROM research_questions WHERE project_id = ?", (project_id,)
+        )["count"]
+        return project
+
+    def update_research_project(self, project_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        self.get_research_project(project_id)
+        updates: list[str] = []
+        values: list[Any] = []
+        if "title" in payload:
+            updates.append("title = ?")
+            values.append(clean_ws(str(payload["title"])))
+        if "slug" in payload and payload.get("slug"):
+            updates.append("slug = ?")
+            values.append(self._unique_project_slug(str(payload["slug"]), project_id))
+        if "status" in payload:
+            updates.append("status = ?")
+            values.append(self._valid_choice(payload["status"], PROJECT_STATUSES, "project status"))
+        if "goal" in payload:
+            updates.append("goal = ?")
+            values.append(clean_ws(str(payload["goal"])))
+        if "current_state" in payload:
+            updates.append("current_state = ?")
+            values.append(clean_ws(str(payload["current_state"])))
+        if updates:
+            updates.append("updated_at = ?")
+            values.append(utcnow())
+            values.append(project_id)
+            self.store.execute(f"UPDATE research_projects SET {', '.join(updates)} WHERE id = ?", tuple(values))
+        return self.get_research_project(project_id)
+
+    def create_research_question(self, payload: dict[str, Any]) -> dict[str, Any]:
+        project_id = int(payload.get("project_id") or 0)
+        self.get_research_project(project_id)
+        status = self._valid_choice(payload.get("status", "open"), QUESTION_STATUSES, "question status")
+        now = utcnow()
+        question_id = self.store.execute(
+            """
+            INSERT INTO research_questions
+                (project_id, question, status, current_answer, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                project_id,
+                clean_ws(str(payload.get("question") or "")),
+                status,
+                clean_ws(str(payload.get("current_answer") or "")),
+                now,
+                now,
+            ),
+        )
+        return self.get_research_question(question_id)
+
+    def list_research_questions(self, project_id: int | None = None, status: str = "") -> list[dict[str, Any]]:
+        clauses = []
+        values: list[Any] = []
+        if project_id:
+            clauses.append("project_id = ?")
+            values.append(project_id)
+        if status:
+            clauses.append("status = ?")
+            values.append(status)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self.store.query_all(
+            f"SELECT * FROM research_questions {where} ORDER BY updated_at DESC, id DESC",
+            tuple(values),
+        )
+        return [research_question_row(row) for row in rows]
+
+    def get_research_question(self, question_id: int) -> dict[str, Any]:
+        row = self.store.query_one("SELECT * FROM research_questions WHERE id = ?", (question_id,))
+        if not row:
+            raise KeyError("research question not found")
+        return research_question_row(row)
+
+    def update_research_question(self, question_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        self.get_research_question(question_id)
+        updates: list[str] = []
+        values: list[Any] = []
+        if "question" in payload:
+            updates.append("question = ?")
+            values.append(clean_ws(str(payload["question"])))
+        if "status" in payload:
+            updates.append("status = ?")
+            values.append(self._valid_choice(payload["status"], QUESTION_STATUSES, "question status"))
+        if "current_answer" in payload:
+            updates.append("current_answer = ?")
+            values.append(clean_ws(str(payload["current_answer"])))
+        if updates:
+            updates.append("updated_at = ?")
+            values.append(utcnow())
+            values.append(question_id)
+            self.store.execute(f"UPDATE research_questions SET {', '.join(updates)} WHERE id = ?", tuple(values))
+        return self.get_research_question(question_id)
+
+    def create_research_note(self, payload: dict[str, Any]) -> dict[str, Any]:
+        project_id = int(payload.get("project_id") or 0)
+        self.get_research_project(project_id)
+        now = utcnow()
+        note_id = self.store.execute(
+            """
+            INSERT INTO research_notes
+                (project_id, title, body_markdown, note_type, status, tags_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                project_id,
+                clean_ws(str(payload.get("title") or "Untitled note")),
+                str(payload.get("body_markdown") or ""),
+                self._valid_choice(payload.get("note_type", "idea"), NOTE_TYPES, "note type"),
+                self._valid_choice(payload.get("status", "active"), NOTE_STATUSES, "note status"),
+                dumps(sorted({str(tag).strip() for tag in payload.get("tags", []) if str(tag).strip()})),
+                now,
+                now,
+            ),
+        )
+        return self.get_research_note(note_id)
+
+    def list_research_notes(
+        self,
+        project_id: int | None = None,
+        q: str = "",
+        status: str = "",
+        note_type: str = "",
+        tag: str = "",
+    ) -> list[dict[str, Any]]:
+        clauses = []
+        values: list[Any] = []
+        if project_id:
+            clauses.append("project_id = ?")
+            values.append(project_id)
+        if status:
+            clauses.append("status = ?")
+            values.append(status)
+        if note_type:
+            clauses.append("note_type = ?")
+            values.append(note_type)
+        if q:
+            clauses.append("(lower(title) LIKE ? OR lower(body_markdown) LIKE ?)")
+            needle = f"%{q.lower()}%"
+            values.extend([needle, needle])
+        rows = self.store.query_all(
+            f"SELECT * FROM research_notes {'WHERE ' + ' AND '.join(clauses) if clauses else ''} ORDER BY updated_at DESC, id DESC",
+            tuple(values),
+        )
+        notes = [research_note_row(row) for row in rows]
+        if tag:
+            notes = [note for note in notes if tag in note["tags"]]
+        for note in notes:
+            note["links"] = self.research_note_links(note["id"])
+        return notes
+
+    def get_research_note(self, note_id: int) -> dict[str, Any]:
+        row = self.store.query_one("SELECT * FROM research_notes WHERE id = ?", (note_id,))
+        if not row:
+            raise KeyError("research note not found")
+        note = research_note_row(row)
+        note["links"] = self.research_note_links(note_id)
+        return note
+
+    def update_research_note(self, note_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        self.get_research_note(note_id)
+        updates: list[str] = []
+        values: list[Any] = []
+        if "title" in payload:
+            updates.append("title = ?")
+            values.append(clean_ws(str(payload["title"])))
+        if "body_markdown" in payload:
+            updates.append("body_markdown = ?")
+            values.append(str(payload["body_markdown"]))
+        if "note_type" in payload:
+            updates.append("note_type = ?")
+            values.append(self._valid_choice(payload["note_type"], NOTE_TYPES, "note type"))
+        if "status" in payload:
+            updates.append("status = ?")
+            values.append(self._valid_choice(payload["status"], NOTE_STATUSES, "note status"))
+        if "tags" in payload:
+            updates.append("tags_json = ?")
+            values.append(dumps(sorted({str(tag).strip() for tag in payload.get("tags", []) if str(tag).strip()})))
+        if updates:
+            updates.append("updated_at = ?")
+            values.append(utcnow())
+            values.append(note_id)
+            self.store.execute(f"UPDATE research_notes SET {', '.join(updates)} WHERE id = ?", tuple(values))
+        return self.get_research_note(note_id)
+
+    def create_research_link(self, note_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        note = self.get_research_note(note_id)
+        link_type = self._valid_choice(payload.get("link_type"), LINK_TYPES, "link type")
+        relation = self._valid_choice(payload.get("relation"), LINK_RELATIONS, "link relation")
+        metadata = payload.get("metadata") or {}
+        target_id = str(payload.get("target_id") or metadata.get("paper_id") or "")
+        self._validate_research_link_target(link_type, target_id, metadata)
+        now = utcnow()
+        link_id = self.store.execute(
+            """
+            INSERT INTO research_links
+                (project_id, note_id, discussion_message_id, link_type, relation, target_id,
+                 target_uri, label, quote, metadata_json, created_at)
+            VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                note["project_id"],
+                note_id,
+                link_type,
+                relation,
+                target_id,
+                str(payload.get("target_uri") or ""),
+                clean_ws(str(payload.get("label") or "")),
+                str(payload.get("quote") or ""),
+                dumps(metadata),
+                now,
+            ),
+        )
+        return self.get_research_link(link_id)
+
+    def get_research_link(self, link_id: int) -> dict[str, Any]:
+        row = self.store.query_one("SELECT * FROM research_links WHERE id = ?", (link_id,))
+        if not row:
+            raise KeyError("research link not found")
+        return research_link_row(row)
+
+    def research_note_links(self, note_id: int) -> list[dict[str, Any]]:
+        self.store.query_one("SELECT id FROM research_notes WHERE id = ?", (note_id,)) or self._raise_key_error(
+            "research note not found"
+        )
+        return [
+            research_link_row(row)
+            for row in self.store.query_all(
+                "SELECT * FROM research_links WHERE note_id = ? ORDER BY id",
+                (note_id,),
+            )
+        ]
+
+    def create_paper_research_note(self, paper_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        paper = self.get_paper(paper_id)
+        project_id = int(payload.get("project_id") or 0)
+        self.get_research_project(project_id)
+        selected_text = clean_extracted_text(str(payload.get("selected_text") or ""))
+        selected_image = payload.get("selected_image") or None
+        if not selected_text and not selected_image:
+            raise ValueError("selected_text or selected_image is required")
+        body = selected_text or f"Selected region on page {payload.get('page_number') or selected_image.get('page')}"
+        note = self.create_research_note(
+            {
+                "project_id": project_id,
+                "title": payload.get("title") or f"Passage from {paper['title']}",
+                "body_markdown": body,
+                "note_type": "literature_note",
+                "tags": payload.get("tags", []),
+            }
+        )
+        metadata = {
+            "paper_id": paper_id,
+            "page_number": payload.get("page_number") or (selected_image or {}).get("page"),
+            "selected_image": selected_image,
+        }
+        self.create_research_link(
+            note["id"],
+            {
+                "link_type": "paper_region" if selected_image and not selected_text else "paper_passage",
+                "relation": "supports",
+                "target_id": str(paper_id),
+                "label": paper["title"],
+                "quote": selected_text,
+                "metadata": metadata,
+            },
+        )
+        return self.get_research_note(note["id"])
+
+    def create_chat_message_research_note(self, message_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        message = self.store.query_one(
+            """
+            SELECT m.*, s.paper_id
+            FROM chat_messages m
+            JOIN chat_sessions s ON s.id = m.session_id
+            WHERE m.id = ?
+            """,
+            (message_id,),
+        )
+        if not message:
+            raise KeyError("chat message not found")
+        project_id = int(payload.get("project_id") or 0)
+        self.get_research_project(project_id)
+        paper = self.get_paper(int(message["paper_id"]))
+        note = self.create_research_note(
+            {
+                "project_id": project_id,
+                "title": payload.get("title") or f"Answer from {paper['title']}",
+                "body_markdown": message["content"],
+                "note_type": "summary" if message["role"] == "assistant" else "question",
+                "tags": payload.get("tags", []),
+            }
+        )
+        self.create_research_link(
+            note["id"],
+            {
+                "link_type": "chat_message",
+                "relation": "cites",
+                "target_id": str(message_id),
+                "label": f"{paper['title']} chat message {message_id}",
+                "quote": message["content"][:1200],
+                "metadata": {"paper_id": paper["id"], "session_id": message["session_id"], "role": message["role"]},
+            },
+        )
+        return self.get_research_note(note["id"])
+
+    def export_research_project(self, project_id: int) -> str:
+        project = self.get_research_project(project_id)
+        questions = self.list_research_questions(project_id=project_id)
+        notes = self.list_research_notes(project_id=project_id)
+        lines = [
+            f"# {project['title']}",
+            "",
+            f"- Status: {project['status']}",
+            f"- Slug: {project['slug']}",
+            "",
+            "## Goal",
+            "",
+            project["goal"] or "(none)",
+            "",
+            "## Current State",
+            "",
+            project["current_state"] or "(none)",
+            "",
+            "## Questions",
+            "",
+        ]
+        if questions:
+            for question in questions:
+                answer = f" - {question['current_answer']}" if question["current_answer"] else ""
+                lines.append(f"- [{question['status']}] {question['question']}{answer}")
+        else:
+            lines.append("(none)")
+        lines.extend(["", "## Notes", ""])
+        if not notes:
+            lines.append("(none)")
+        for note in notes:
+            lines.extend([f"### {note['title']}", "", note["body_markdown"] or "(empty)", ""])
+            if note.get("links"):
+                lines.append("Evidence:")
+                for link in note["links"]:
+                    citation = self.format_research_link_citation(link)
+                    if link.get("quote"):
+                        lines.append(f"- {citation}: {link['quote']}")
+                    else:
+                        lines.append(f"- {citation}")
+                lines.append("")
+        return "\n".join(lines).strip() + "\n"
+
+    def format_research_link_citation(self, link: dict[str, Any]) -> str:
+        metadata = link.get("metadata") or {}
+        if link["link_type"] in {"paper", "paper_passage", "paper_region"}:
+            paper_id = int(metadata.get("paper_id") or link.get("target_id") or 0)
+            paper = self.get_paper(paper_id)
+            page = metadata.get("page_number")
+            page_label = f", p.{page}" if page else ""
+            return f"[{paper['title']}{page_label}]"
+        if link["link_type"] == "chat_message":
+            return f"[Chat message {link['target_id']}]"
+        return f"[{link['label'] or link['target_uri'] or link['target_id']}]"
+
+    def _valid_choice(self, value: Any, allowed: set[str], label: str) -> str:
+        clean = clean_ws(str(value or ""))
+        if clean not in allowed:
+            raise ValueError(f"invalid {label}: {clean}")
+        return clean
+
+    def _unique_project_slug(self, value: str, current_project_id: int | None = None) -> str:
+        base = slugify(value)
+        slug = base
+        suffix = 2
+        while True:
+            row = self.store.query_one("SELECT id FROM research_projects WHERE slug = ?", (slug,))
+            if not row or row["id"] == current_project_id:
+                return slug
+            slug = f"{base}-{suffix}"
+            suffix += 1
+
+    def _validate_research_link_target(self, link_type: str, target_id: str, metadata: dict[str, Any]) -> None:
+        if link_type in {"paper", "paper_passage", "paper_region"}:
+            paper_id = int(metadata.get("paper_id") or target_id or 0)
+            self.get_paper(paper_id)
+        if link_type == "chat_message":
+            row = self.store.query_one("SELECT id FROM chat_messages WHERE id = ?", (int(target_id or 0),))
+            if not row:
+                raise KeyError("chat message not found")
+
+    def _raise_key_error(self, message: str) -> None:
+        raise KeyError(message)
+
 
 def summarize(title: str, abstract: str) -> str:
     text = abstract.strip()
@@ -1508,4 +1958,26 @@ def paper_row(row: dict[str, Any]) -> dict[str, Any]:
         "authors": loads(row.get("authors_json"), []),
         "tags": loads(row.get("tags_json"), []),
         "bookmarked": bool(row.get("bookmarked")),
+    }
+
+
+def research_project_row(row: dict[str, Any]) -> dict[str, Any]:
+    return dict(row)
+
+
+def research_question_row(row: dict[str, Any]) -> dict[str, Any]:
+    return dict(row)
+
+
+def research_note_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **row,
+        "tags": loads(row.get("tags_json"), []),
+    }
+
+
+def research_link_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **row,
+        "metadata": loads(row.get("metadata_json"), {}),
     }

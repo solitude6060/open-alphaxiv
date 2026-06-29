@@ -311,6 +311,106 @@ async def test_paper_full_text_and_page_manifest_over_http(app: FastAPI) -> None
 
 
 @pytest.mark.asyncio
+async def test_research_project_note_capture_and_export_over_http(app: FastAPI) -> None:
+    async with asgi_client(app) as client:
+        paper_response = await client.post("/api/papers", json={"source": "https://arxiv.org/abs/2201.08239"})
+        assert paper_response.status_code == 200
+        paper_id = paper_response.json()["id"]
+
+        project_response = await client.post(
+            "/api/research/projects",
+            json={
+                "title": "Transformer workspace",
+                "goal": "Track evidence for implementation.",
+                "current_state": "Reading the paper.",
+            },
+        )
+        assert project_response.status_code == 200
+        project = project_response.json()
+
+        question_response = await client.post(
+            "/api/research/questions",
+            json={
+                "project_id": project["id"],
+                "question": "Which result should be reproduced?",
+                "current_answer": "Start with attention layers.",
+            },
+        )
+        project_update_response = await client.patch(
+            f"/api/research/projects/{project['id']}",
+            json={
+                "goal": "Reproduce the attention baseline.",
+                "current_state": "Passage evidence saved; implementation is next.",
+            },
+        )
+        passage_response = await client.post(
+            f"/api/papers/{paper_id}/research-notes",
+            json={
+                "project_id": project["id"],
+                "title": "Selected evidence",
+                "selected_text": "Attention layers are central evidence.",
+                "page_number": 4,
+            },
+        )
+        ask_response = await client.post(
+            "/api/chat/messages",
+            json={"paper_id": paper_id, "query": "What is the paper about?"},
+        )
+        answer_note_response = await client.post(
+            f"/api/chat/messages/{ask_response.json()['message_id']}/research-note",
+            json={"project_id": project["id"], "title": "Assistant answer"},
+        )
+        notes_response = await client.get(f"/api/research/notes?project_id={project['id']}")
+        passage_links_response = await client.get(
+            f"/api/research/notes/{passage_response.json()['id']}/links"
+        )
+        export_response = await client.get(f"/api/research/projects/{project['id']}/export.md")
+
+    assert question_response.status_code == 200
+    assert project_update_response.status_code == 200
+    assert project_update_response.json()["current_state"] == "Passage evidence saved; implementation is next."
+    assert passage_response.status_code == 200
+    assert answer_note_response.status_code == 200
+    assert notes_response.status_code == 200
+    assert len(notes_response.json()) == 2
+    assert passage_links_response.status_code == 200
+    assert passage_links_response.json()[0]["link_type"] == "paper_passage"
+    assert passage_links_response.json()[0]["metadata"]["page_number"] == 4
+    assert export_response.status_code == 200
+    assert "# Transformer workspace" in export_response.text
+    assert "Reproduce the attention baseline." in export_response.text
+    assert "Passage evidence saved; implementation is next." in export_response.text
+    assert "[Deterministic API paper 2201.08239, p.4]" in export_response.text
+    assert "Assistant answer" in export_response.text
+
+
+@pytest.mark.asyncio
+async def test_research_link_rejects_unknown_paper_over_http(app: FastAPI) -> None:
+    async with asgi_client(app) as client:
+        project_response = await client.post("/api/research/projects", json={"title": "Invalid link"})
+        note_response = await client.post(
+            "/api/research/notes",
+            json={
+                "project_id": project_response.json()["id"],
+                "title": "Evidence note",
+                "body_markdown": "Needs a valid paper link.",
+            },
+        )
+        response = await client.post(
+            f"/api/research/notes/{note_response.json()['id']}/links",
+            json={
+                "link_type": "paper_passage",
+                "relation": "supports",
+                "target_id": "999",
+                "quote": "missing paper",
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "paper not found"
+
+
+@pytest.mark.asyncio
 async def test_chat_messages_rejects_invalid_answer_mode_over_http(app: FastAPI) -> None:
     async with asgi_client(app) as client:
         paper_response = await client.post("/api/papers", json={"source": "https://arxiv.org/abs/2201.08239"})

@@ -11,7 +11,7 @@ Build a local-first web application that combines:
 - Docker Compose deployment.
 
 This specification covers the intended system contract. It does not implement
-the application yet.
+every roadmap item yet, but the implemented MVP follows this contract.
 
 ## Reference Architecture
 
@@ -38,7 +38,7 @@ Optional services:
 
 The default Docker Compose profile should expose:
 
-- Web UI: `http://localhost:3000`
+- Web UI: `http://localhost:3100`
 - API: `http://localhost:8000`
 - API docs: `http://localhost:8000/docs`
 - PostgreSQL: internal only by default
@@ -228,6 +228,80 @@ Fields:
 - `health_status`
 - `last_checked_at`
 
+### ResearchProject
+
+Persistent research workspace scoped to a research direction.
+
+Fields:
+
+- `id`
+- `title`
+- `slug`
+- `status`: `active`, `paused`, `completed`, `archived`
+- `goal`
+- `current_state`
+- `created_at`
+- `updated_at`
+
+Constraints:
+
+- `slug` is unique.
+- UI archive actions update `status`; they do not hard-delete projects.
+
+### ResearchQuestion
+
+Fields:
+
+- `id`
+- `project_id`
+- `question`
+- `status`: `open`, `investigating`, `answered`, `abandoned`
+- `current_answer`
+- `created_at`
+- `updated_at`
+
+### ResearchNote
+
+Fields:
+
+- `id`
+- `project_id`
+- `title`
+- `body_markdown`
+- `note_type`: `idea`, `question`, `summary`, `experiment_note`, `decision`,
+  `todo`, `meeting`, `literature_note`
+- `status`: `draft`, `active`, `resolved`, `archived`
+- `tags_json`
+- `created_at`
+- `updated_at`
+
+### ResearchLink
+
+Evidence link owned by a research note or future discussion message.
+
+Fields:
+
+- `id`
+- `project_id`
+- `note_id`
+- `discussion_message_id`
+- `link_type`: `paper`, `paper_passage`, `paper_region`, `chat_message`,
+  `code_path`, `experiment_run`, `experiment_artifact`, `external_url`
+- `relation`: `supports`, `contradicts`, `extends`, `implements`, `cites`,
+  `mentions`, `questions`
+- `target_id`
+- `target_uri`
+- `label`
+- `quote`
+- `metadata_json`
+- `created_at`
+
+Constraints:
+
+- At least one owner is required:
+  `note_id IS NOT NULL OR discussion_message_id IS NOT NULL`.
+- Paper and chat targets must resolve to existing local records.
+
 ## API Surface
 
 ### Paper APIs
@@ -281,6 +355,25 @@ Fields:
 - `POST /api/providers/{provider_id}/healthcheck`
 - `POST /api/providers/{provider_id}/set-default`
 - `DELETE /api/providers/{provider_id}`
+
+### Research Workspace APIs
+
+- `POST /api/research/projects`
+- `GET /api/research/projects`
+- `GET /api/research/projects/{project_id}`
+- `PATCH /api/research/projects/{project_id}`
+- `GET /api/research/projects/{project_id}/export.md`
+- `POST /api/research/questions`
+- `GET /api/research/questions`
+- `PATCH /api/research/questions/{question_id}`
+- `POST /api/research/notes`
+- `GET /api/research/notes`
+- `GET /api/research/notes/{note_id}`
+- `PATCH /api/research/notes/{note_id}`
+- `POST /api/research/notes/{note_id}/links`
+- `GET /api/research/notes/{note_id}/links`
+- `POST /api/papers/{paper_id}/research-notes`
+- `POST /api/chat/messages/{message_id}/research-note`
 
 ### GitHub APIs
 
@@ -441,6 +534,9 @@ MVP implementation should include:
 - Integration test for paper ingestion with a small fixture PDF.
 - Integration test for chat with a mocked OpenAI-compatible provider.
 - Integration test for provider health check.
+- Integration tests for research projects, notes, evidence links, paper-passage
+  capture, Ask Paper answer capture, archival status updates, and Markdown
+  project export.
 - End-to-end test for the main flow:
   - configure provider
   - ingest paper
