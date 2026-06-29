@@ -321,6 +321,32 @@ a {
   background: rgba(82, 198, 184, 0.36);
 }
 
+.upload-picker {
+  max-width: 150px;
+  min-height: 34px;
+  border: 1px solid rgba(190, 208, 214, 0.26);
+  border-radius: 6px;
+  padding: 7px 9px;
+  display: inline-flex;
+  align-items: center;
+  color: #d8e3e6;
+  background: rgba(255, 255, 255, 0.08);
+  cursor: pointer;
+}
+
+.upload-picker input {
+  display: none;
+}
+
+.upload-picker span {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .topbar-actions {
   justify-content: flex-end;
   gap: 8px;
@@ -403,6 +429,15 @@ a {
   background: #2d7d6f;
   color: white;
   font-weight: 700;
+}
+
+.primary.secondary {
+  background: #526870;
+}
+
+.primary:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
 }
 
 .primary.wide {

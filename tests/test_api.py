@@ -11,6 +11,33 @@ from fastapi import FastAPI
 from app.main import create_app, service
 
 
+def minimal_pdf_bytes() -> bytes:
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>",
+    ]
+    content = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for index, obj in enumerate(objects, start=1):
+        offsets.append(len(content))
+        content.extend(f"{index} 0 obj\n".encode("ascii"))
+        content.extend(obj + b"\n")
+        content.extend(b"endobj\n")
+    xref_offset = len(content)
+    content.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+    content.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        content.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    content.extend(
+        (
+            f"trailer\n<< /Root 1 0 R /Size {len(objects) + 1} >>\n"
+            f"startxref\n{xref_offset}\n%%EOF\n"
+        ).encode("ascii")
+    )
+    return bytes(content)
+
+
 @pytest.fixture(autouse=True)
 def deterministic_arxiv_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
     def metadata(arxiv_id: str) -> dict[str, object]:
@@ -179,6 +206,80 @@ async def test_chat_session_history_over_http(app: FastAPI) -> None:
         "user",
         "assistant",
     ]
+
+
+@pytest.mark.asyncio
+async def test_upload_paper_accepts_raw_pdf_over_http(app: FastAPI) -> None:
+    async with asgi_client(app) as client:
+        response = await client.post(
+            "/api/papers/upload",
+            content=minimal_pdf_bytes(),
+            headers={
+                "content-type": "application/pdf",
+                "x-filename": "local-api-study.pdf",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ready"
+    assert payload["source_type"] == "upload"
+    assert payload["title"] == "local api study"
+    assert payload["full_text_available"] is True
+    assert payload["page_image_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_upload_paper_rejects_non_pdf_over_http(app: FastAPI) -> None:
+    async with asgi_client(app) as client:
+        response = await client.post(
+            "/api/papers/upload",
+            content=b"not a pdf",
+            headers={
+                "content-type": "text/plain",
+                "x-filename": "notes.txt",
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "uploaded file must be a PDF"
+
+
+@pytest.mark.asyncio
+async def test_upload_paper_rejects_unparseable_pdf_over_http(app: FastAPI) -> None:
+    async with asgi_client(app) as client:
+        response = await client.post(
+            "/api/papers/upload",
+            content=b"%PDF-1.4 header only",
+            headers={
+                "content-type": "application/pdf",
+                "x-filename": "fake.pdf",
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "uploaded file must be a parseable PDF"
+
+
+@pytest.mark.asyncio
+async def test_upload_paper_rejects_oversized_pdf_over_http(
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.main.MAX_UPLOAD_PDF_BYTES", 10)
+
+    async with asgi_client(app) as client:
+        response = await client.post(
+            "/api/papers/upload",
+            content=minimal_pdf_bytes(),
+            headers={
+                "content-type": "application/pdf",
+                "x-filename": "large.pdf",
+            },
+        )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "uploaded PDF exceeds 10 byte limit"
 
 
 @pytest.mark.asyncio
