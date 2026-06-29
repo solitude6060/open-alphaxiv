@@ -1237,6 +1237,42 @@ textarea {
   font-size: 12px;
 }
 
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.metric-grid span {
+  border: 1px solid #dbe3e6;
+  border-radius: 6px;
+  padding: 8px;
+  display: grid;
+  gap: 2px;
+  color: #62777e;
+  font-size: 11px;
+  background: #fff;
+}
+
+.metric-grid b {
+  color: #203038;
+  font-size: 15px;
+}
+
+.inline-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #526870;
+  font-size: 12px;
+}
+
+.inline-toggle input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+}
+
 .research-row {
   border: 1px solid #dbe3e6;
   border-radius: 6px;

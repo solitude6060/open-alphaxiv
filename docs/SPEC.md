@@ -480,6 +480,14 @@ Constraints:
 - `GET /api/research/projects/{project_id}/grounding-snapshots`
 - `GET /api/research/grounding-snapshots/{snapshot_id}`
 
+### Research Dashboard And Search APIs
+
+- `GET /api/research/dashboard`
+- `GET /api/research/search?q=<query>&project_id=<optional>`
+
+Search results are bounded typed rows with `type`, `id`, `project_id`,
+`title`, `snippet`, and `created_at`.
+
 ### GitHub APIs
 
 - `GET /api/auth/github/start`
@@ -646,6 +654,8 @@ MVP implementation should include:
   evidence links, run-to-note capture, and project export.
 - Integration tests for research discussions, discussion messages, grounding
   snapshots, and discussion/snapshot export.
+- Integration tests for the research dashboard summary, local typed search, and
+  project-scoped search.
 - End-to-end test for the main flow:
   - configure provider
   - ingest paper

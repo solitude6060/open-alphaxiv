@@ -261,6 +261,26 @@ type GroundingSnapshot = {
   metadata: Record<string, unknown>;
 };
 
+type ResearchDashboard = {
+  counts: Record<string, number>;
+  active_projects: Array<ResearchProject & {
+    question_count: number;
+    note_count: number;
+    experiment_run_count: number;
+    discussion_count: number;
+    grounding_snapshot_count: number;
+  }>;
+};
+
+type ResearchSearchResult = {
+  type: string;
+  id: number;
+  project_id: number;
+  title: string;
+  snippet: string;
+  created_at: string;
+};
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, {
     ...options,
@@ -311,6 +331,8 @@ function App() {
   const [experimentRuns, setExperimentRuns] = useState<ExperimentRun[]>([]);
   const [researchDiscussions, setResearchDiscussions] = useState<ResearchDiscussion[]>([]);
   const [groundingSnapshots, setGroundingSnapshots] = useState<GroundingSnapshot[]>([]);
+  const [researchDashboard, setResearchDashboard] = useState<ResearchDashboard | null>(null);
+  const [researchSearchResults, setResearchSearchResults] = useState<ResearchSearchResult[]>([]);
   const [selectedDiscussionId, setSelectedDiscussionId] = useState<number | null>(null);
   const [projectTitle, setProjectTitle] = useState("New research project");
   const [projectGoal, setProjectGoal] = useState("");
@@ -327,6 +349,8 @@ function App() {
   const [discussionTitle, setDiscussionTitle] = useState("Research discussion");
   const [discussionMessage, setDiscussionMessage] = useState("");
   const [snapshotTitle, setSnapshotTitle] = useState("Grounding snapshot");
+  const [researchSearchQuery, setResearchSearchQuery] = useState("");
+  const [searchSelectedProjectOnly, setSearchSelectedProjectOnly] = useState(true);
   const [status, setStatus] = useState("Loading local workspace");
   const [error, setError] = useState("");
 
@@ -360,8 +384,12 @@ function App() {
   }
 
   async function refreshResearch(preferredProjectId?: number) {
-    const projects = await request<ResearchProject[]>("/api/research/projects");
+    const [projects, dashboard] = await Promise.all([
+      request<ResearchProject[]>("/api/research/projects"),
+      request<ResearchDashboard>("/api/research/dashboard")
+    ]);
     setResearchProjects(projects);
+    setResearchDashboard(dashboard);
     const nextProjectId = preferredProjectId || selectedProjectId || projects[0]?.id || null;
     setSelectedProjectId(nextProjectId);
     if (!nextProjectId) {
@@ -686,6 +714,21 @@ function App() {
     setSnapshotTitle("Grounding snapshot");
     await refreshResearch(selectedProjectId);
     setStatus("Grounding snapshot saved");
+  }
+
+  async function runResearchSearch() {
+    const queryText = researchSearchQuery.trim();
+    if (!queryText) {
+      setResearchSearchResults([]);
+      return;
+    }
+    const params = new URLSearchParams({ q: queryText });
+    if (searchSelectedProjectOnly && selectedProjectId) {
+      params.set("project_id", String(selectedProjectId));
+    }
+    const results = await request<ResearchSearchResult[]>(`/api/research/search?${params.toString()}`);
+    setResearchSearchResults(results);
+    setStatus(`Found ${results.length} research results`);
   }
 
   async function saveSelectedPassageToResearch() {
@@ -1136,6 +1179,35 @@ function App() {
                   <h2><Tags size={18} /> Research</h2>
                   <span>{researchProjects.length} projects</span>
                 </div>
+                {researchDashboard ? (
+                  <div className="research-list">
+                    <strong>Status dashboard</strong>
+                    <div className="metric-grid">
+                      {[
+                        ["Projects", researchDashboard.counts.projects],
+                        ["Questions", researchDashboard.counts.questions],
+                        ["Notes", researchDashboard.counts.notes],
+                        ["Runs", researchDashboard.counts.experiment_runs],
+                        ["Discussions", researchDashboard.counts.discussions],
+                        ["Snapshots", researchDashboard.counts.grounding_snapshots]
+                      ].map(([label, value]) => (
+                        <span key={label}>
+                          <b>{String(value || 0)}</b>
+                          {label}
+                        </span>
+                      ))}
+                    </div>
+                    {researchDashboard.active_projects.slice(0, 3).map((project) => (
+                      <article key={project.id} className="research-row">
+                        <p>{project.title}</p>
+                        <small>
+                          {project.question_count} questions · {project.note_count} notes ·{" "}
+                          {project.experiment_run_count} runs · {project.discussion_count} discussions
+                        </small>
+                      </article>
+                    ))}
+                  </div>
+                ) : null}
                 <div className="research-create-row">
                   <input
                     value={projectTitle}
@@ -1165,6 +1237,48 @@ function App() {
                 ) : (
                   <div className="conversation-empty">Create a project to start persistent research notes.</div>
                 )}
+                <div className="research-list">
+                  <strong>Search research</strong>
+                  <div className="research-create-row">
+                    <input
+                      value={researchSearchQuery}
+                      onChange={(event) => setResearchSearchQuery(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          runResearchSearch().catch((err) => setError(String(err.message || err)));
+                        }
+                      }}
+                      placeholder="Search notes, runs, discussions..."
+                      aria-label="Search research"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => runResearchSearch().catch((err) => setError(String(err.message || err)))}
+                      title="Search research"
+                    >
+                      <Search size={15} />
+                    </button>
+                  </div>
+                  <label className="inline-toggle">
+                    <input
+                      type="checkbox"
+                      checked={searchSelectedProjectOnly}
+                      onChange={(event) => setSearchSelectedProjectOnly(event.target.checked)}
+                    />
+                    Selected project only
+                  </label>
+                  {researchSearchResults.length === 0 ? (
+                    <span>No search results.</span>
+                  ) : (
+                    researchSearchResults.map((result) => (
+                      <article key={`${result.type}-${result.id}`} className="research-row">
+                        <span>{result.type.replaceAll("_", " ")}</span>
+                        <p>{result.title}</p>
+                        {result.snippet ? <small>{result.snippet}</small> : null}
+                      </article>
+                    ))
+                  )}
+                </div>
                 {selectedProjectId ? (
                   <div className="research-actions">
                     <a
