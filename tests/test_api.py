@@ -482,6 +482,79 @@ async def test_experiment_artifact_rejects_unknown_run_over_http(app: FastAPI) -
 
 
 @pytest.mark.asyncio
+async def test_research_discussions_and_grounding_snapshots_over_http(app: FastAPI) -> None:
+    async with asgi_client(app) as client:
+        project_response = await client.post(
+            "/api/research/projects",
+            json={
+                "title": "HTTP grounded discussion",
+                "goal": "Discuss experiment evidence.",
+                "current_state": "Run is ready.",
+            },
+        )
+        project = project_response.json()
+        run_response = await client.post(
+            "/api/experiments/runs",
+            json={
+                "project_id": project["id"],
+                "title": "HTTP baseline run",
+                "dataset": "WMT14 en-de",
+                "metrics": {"bleu": 29.2},
+                "summary": "HTTP run supports the claim.",
+            },
+        )
+        discussion_response = await client.post(
+            "/api/research/discussions",
+            json={"project_id": project["id"], "title": "Discuss HTTP run"},
+        )
+        assert discussion_response.status_code == 200
+        discussion = discussion_response.json()
+        user_message_response = await client.post(
+            f"/api/research/discussions/{discussion['id']}/messages",
+            json={"role": "user", "content": "What does this run mean?"},
+        )
+        assistant_message_response = await client.post(
+            f"/api/research/discussions/{discussion['id']}/messages",
+            json={"role": "assistant", "content": "The run is consistent with the claim."},
+        )
+        snapshot_response = await client.post(
+            f"/api/research/projects/{project['id']}/grounding-snapshots",
+            json={
+                "title": "HTTP grounding",
+                "discussion_message_id": assistant_message_response.json()["id"],
+            },
+        )
+        discussions_response = await client.get(f"/api/research/discussions?project_id={project['id']}")
+        snapshots_response = await client.get(f"/api/research/projects/{project['id']}/grounding-snapshots")
+        export_response = await client.get(f"/api/research/projects/{project['id']}/export.md")
+
+    assert run_response.status_code == 200
+    assert discussion_response.status_code == 200
+    assert user_message_response.status_code == 200
+    assert assistant_message_response.status_code == 200
+    assert snapshot_response.status_code == 200
+    assert "HTTP baseline run" in snapshot_response.json()["content_markdown"]
+    assert discussions_response.status_code == 200
+    assert discussions_response.json()[0]["message_count"] == 2
+    assert snapshots_response.status_code == 200
+    assert snapshots_response.json()[0]["title"] == "HTTP grounding"
+    assert "## Discussions" in export_response.text
+    assert "## Grounding Snapshots" in export_response.text
+
+
+@pytest.mark.asyncio
+async def test_grounding_snapshot_rejects_unknown_project_over_http(app: FastAPI) -> None:
+    async with asgi_client(app) as client:
+        response = await client.post(
+            "/api/research/projects/999/grounding-snapshots",
+            json={"title": "Missing"},
+        )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "research project not found"
+
+
+@pytest.mark.asyncio
 async def test_chat_messages_rejects_invalid_answer_mode_over_http(app: FastAPI) -> None:
     async with asgi_client(app) as client:
         paper_response = await client.post("/api/papers", json={"source": "https://arxiv.org/abs/2201.08239"})

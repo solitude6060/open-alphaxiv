@@ -792,3 +792,100 @@ def test_research_links_validate_experiment_targets(service: PaperService) -> No
             note["id"],
             {"link_type": "experiment_artifact", "relation": "supports", "target_id": "999"},
         )
+
+
+def test_research_discussions_grounding_snapshots_and_export(service: PaperService) -> None:
+    project = service.create_research_project(
+        {
+            "title": "Grounded research discussion",
+            "goal": "Decide whether the experiment supports the paper claim.",
+            "current_state": "One baseline run is available.",
+        }
+    )
+    question = service.create_research_question(
+        {"project_id": project["id"], "question": "Does the baseline reproduce the claim?"}
+    )
+    note = service.create_research_note(
+        {
+            "project_id": project["id"],
+            "title": "Paper claim",
+            "body_markdown": "The paper claims attention improves translation quality.",
+            "note_type": "literature_note",
+        }
+    )
+    run = service.create_experiment_run(
+        {
+            "project_id": project["id"],
+            "title": "Baseline reproduction",
+            "dataset": "WMT14 en-de",
+            "metrics": {"bleu": 29.1},
+            "summary": "The baseline is within tolerance.",
+        }
+    )
+    artifact = service.create_experiment_artifact(
+        run["id"],
+        {"artifact_type": "metrics", "uri": "file:///runs/baseline/metrics.json", "label": "Metrics"},
+    )
+    discussion = service.create_research_discussion(
+        {"project_id": project["id"], "title": "Interpret baseline result"}
+    )
+    user_message = service.create_research_discussion_message(
+        discussion["id"],
+        {"role": "user", "content": "Does the experiment support the paper claim?"},
+    )
+    assistant_message = service.create_research_discussion_message(
+        discussion["id"],
+        {"role": "assistant", "content": "It supports the claim within the observed metric tolerance."},
+    )
+    message_link = service.create_discussion_research_link(
+        assistant_message["id"],
+        {"link_type": "experiment_run", "relation": "supports", "target_id": str(run["id"])},
+    )
+    snapshot = service.create_grounding_snapshot(
+        project["id"],
+        {"title": "Baseline grounding", "discussion_message_id": assistant_message["id"]},
+    )
+
+    assert discussion["status"] == "active"
+    assert user_message["role"] == "user"
+    assert assistant_message["discussion_id"] == discussion["id"]
+    assert message_link["discussion_message_id"] == assistant_message["id"]
+    assert question["question"] in snapshot["content_markdown"]
+    assert note["title"] in snapshot["content_markdown"]
+    assert run["title"] in snapshot["content_markdown"]
+    assert artifact["label"] in snapshot["content_markdown"]
+    assert snapshot["metadata"]["note_count"] == 1
+    assert snapshot["metadata"]["experiment_run_count"] == 1
+
+    exported = service.export_research_project(project["id"])
+
+    assert "## Discussions" in exported
+    assert "Interpret baseline result" in exported
+    assert "## Grounding Snapshots" in exported
+    assert "Baseline grounding" in exported
+    assert "It supports the claim" in exported
+
+
+def test_discussion_message_references_follow_message_lifecycle(service: PaperService) -> None:
+    project = service.create_research_project({"title": "Message lifecycle"})
+    discussion = service.create_research_discussion({"project_id": project["id"], "title": "Lifecycle"})
+    message = service.create_research_discussion_message(discussion["id"], {"content": "Evidence reference"})
+    link = service.create_discussion_research_link(
+        message["id"],
+        {"link_type": "code_path", "relation": "mentions", "target_id": "experiments/baseline.py"},
+    )
+    snapshot = service.create_grounding_snapshot(
+        project["id"],
+        {"title": "Lifecycle snapshot", "discussion_message_id": message["id"]},
+    )
+
+    service.store.execute("DELETE FROM research_discussion_messages WHERE id = ?", (message["id"],))
+
+    assert service.store.query_one("SELECT id FROM research_links WHERE id = ?", (link["id"],)) is None
+    snapshot_row = service.store.query_one("SELECT discussion_message_id FROM grounding_snapshots WHERE id = ?", (snapshot["id"],))
+    assert snapshot_row == {"discussion_message_id": None}
+
+
+def test_grounding_snapshot_rejects_unknown_project(service: PaperService) -> None:
+    with pytest.raises(KeyError, match="research project not found"):
+        service.create_grounding_snapshot(999, {"title": "Missing project"})

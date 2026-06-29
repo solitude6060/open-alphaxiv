@@ -27,6 +27,8 @@ context.
   with evidence links.
 - Track experiment runs with datasets, commands, code references, metrics,
   summaries, and artifact references.
+- Record project-level research discussions and freeze grounding snapshots for
+  later review.
 - Export a research project as readable Markdown with paper and chat citations.
 - Use the built-in mock answer mode for local development without an external
   model.

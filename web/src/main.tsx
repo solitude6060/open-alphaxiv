@@ -248,6 +248,22 @@ type ExperimentRun = {
   artifact_count: number;
 };
 
+type ResearchDiscussion = {
+  id: number;
+  project_id: number;
+  title: string;
+  status: string;
+  message_count: number;
+};
+
+type GroundingSnapshot = {
+  id: number;
+  project_id: number;
+  title: string;
+  content_markdown: string;
+  metadata: Record<string, unknown>;
+};
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, {
     ...options,
@@ -298,6 +314,9 @@ function App() {
   const [researchQuestions, setResearchQuestions] = useState<ResearchQuestion[]>([]);
   const [researchNotes, setResearchNotes] = useState<ResearchNote[]>([]);
   const [experimentRuns, setExperimentRuns] = useState<ExperimentRun[]>([]);
+  const [researchDiscussions, setResearchDiscussions] = useState<ResearchDiscussion[]>([]);
+  const [groundingSnapshots, setGroundingSnapshots] = useState<GroundingSnapshot[]>([]);
+  const [selectedDiscussionId, setSelectedDiscussionId] = useState<number | null>(null);
   const [projectTitle, setProjectTitle] = useState("New research project");
   const [projectGoal, setProjectGoal] = useState("");
   const [projectCurrentState, setProjectCurrentState] = useState("");
@@ -310,6 +329,9 @@ function App() {
   const [experimentCommand, setExperimentCommand] = useState("");
   const [experimentMetrics, setExperimentMetrics] = useState('{"metric": 0}');
   const [experimentSummary, setExperimentSummary] = useState("");
+  const [discussionTitle, setDiscussionTitle] = useState("Research discussion");
+  const [discussionMessage, setDiscussionMessage] = useState("");
+  const [snapshotTitle, setSnapshotTitle] = useState("Grounding snapshot");
   const [status, setStatus] = useState("Loading local workspace");
   const [error, setError] = useState("");
 
@@ -351,16 +373,24 @@ function App() {
       setResearchQuestions([]);
       setResearchNotes([]);
       setExperimentRuns([]);
+      setResearchDiscussions([]);
+      setGroundingSnapshots([]);
+      setSelectedDiscussionId(null);
       return;
     }
-    const [questions, notes, runs] = await Promise.all([
+    const [questions, notes, runs, discussions, snapshots] = await Promise.all([
       request<ResearchQuestion[]>(`/api/research/questions?project_id=${nextProjectId}`),
       request<ResearchNote[]>(`/api/research/notes?project_id=${nextProjectId}`),
-      request<ExperimentRun[]>(`/api/experiments/runs?project_id=${nextProjectId}`)
+      request<ExperimentRun[]>(`/api/experiments/runs?project_id=${nextProjectId}`),
+      request<ResearchDiscussion[]>(`/api/research/discussions?project_id=${nextProjectId}`),
+      request<GroundingSnapshot[]>(`/api/research/projects/${nextProjectId}/grounding-snapshots`)
     ]);
     setResearchQuestions(questions);
     setResearchNotes(notes);
     setExperimentRuns(runs);
+    setResearchDiscussions(discussions);
+    setGroundingSnapshots(snapshots);
+    setSelectedDiscussionId((current) => current || discussions[0]?.id || null);
   }
 
   useEffect(() => {
@@ -652,6 +682,40 @@ function App() {
     });
     await refreshResearch(selectedProjectId);
     setStatus("Experiment run saved to research notes");
+  }
+
+  async function createResearchDiscussion() {
+    if (!selectedProjectId || !discussionTitle.trim()) return;
+    const discussion = await request<ResearchDiscussion>("/api/research/discussions", {
+      method: "POST",
+      body: JSON.stringify({ project_id: selectedProjectId, title: discussionTitle.trim() })
+    });
+    setSelectedDiscussionId(discussion.id);
+    setDiscussionTitle("Research discussion");
+    await refreshResearch(selectedProjectId);
+    setStatus("Research discussion created");
+  }
+
+  async function addResearchDiscussionMessage() {
+    if (!selectedProjectId || !selectedDiscussionId || !discussionMessage.trim()) return;
+    await request(`/api/research/discussions/${selectedDiscussionId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ role: "user", content: discussionMessage.trim() })
+    });
+    setDiscussionMessage("");
+    await refreshResearch(selectedProjectId);
+    setStatus("Discussion message saved");
+  }
+
+  async function createGroundingSnapshot() {
+    if (!selectedProjectId || !snapshotTitle.trim()) return;
+    await request<GroundingSnapshot>(`/api/research/projects/${selectedProjectId}/grounding-snapshots`, {
+      method: "POST",
+      body: JSON.stringify({ title: snapshotTitle.trim() })
+    });
+    setSnapshotTitle("Grounding snapshot");
+    await refreshResearch(selectedProjectId);
+    setStatus("Grounding snapshot saved");
   }
 
   async function saveSelectedPassageToResearch() {
@@ -1335,6 +1399,82 @@ function App() {
                                   .join(", ")}
                               </small>
                             ) : null}
+                          </article>
+                        ))
+                      )}
+                    </div>
+                    <label className="field-label">
+                      Discussion title
+                      <input
+                        value={discussionTitle}
+                        onChange={(event) => setDiscussionTitle(event.target.value)}
+                        placeholder="Discuss current evidence"
+                      />
+                    </label>
+                    <button
+                      className="quiet-button wide-button"
+                      type="button"
+                      onClick={() => createResearchDiscussion().catch((err) => setError(String(err.message || err)))}
+                    >
+                      <MessageSquare size={15} /> Create discussion
+                    </button>
+                    {researchDiscussions.length > 0 ? (
+                      <select
+                        value={selectedDiscussionId || ""}
+                        onChange={(event) => setSelectedDiscussionId(Number(event.target.value) || null)}
+                        aria-label="Research discussion"
+                      >
+                        {researchDiscussions.map((discussion) => (
+                          <option key={discussion.id} value={discussion.id}>
+                            {discussion.title} · {discussion.message_count} messages
+                          </option>
+                        ))}
+                      </select>
+                    ) : null}
+                    <label className="field-label">
+                      Discussion message
+                      <textarea
+                        value={discussionMessage}
+                        onChange={(event) => setDiscussionMessage(event.target.value)}
+                        placeholder="Record a project-level research discussion message..."
+                      />
+                    </label>
+                    <button
+                      className="quiet-button wide-button"
+                      type="button"
+                      onClick={() =>
+                        addResearchDiscussionMessage().catch((err) => setError(String(err.message || err)))
+                      }
+                    >
+                      <Clipboard size={15} /> Save discussion message
+                    </button>
+                    <label className="field-label">
+                      Snapshot title
+                      <input
+                        value={snapshotTitle}
+                        onChange={(event) => setSnapshotTitle(event.target.value)}
+                        placeholder="Grounding snapshot"
+                      />
+                    </label>
+                    <button
+                      className="quiet-button wide-button"
+                      type="button"
+                      onClick={() => createGroundingSnapshot().catch((err) => setError(String(err.message || err)))}
+                    >
+                      <Database size={15} /> Save grounding snapshot
+                    </button>
+                    <div className="research-list">
+                      <strong>Grounding snapshots</strong>
+                      {groundingSnapshots.length === 0 ? (
+                        <span>No grounding snapshots yet.</span>
+                      ) : (
+                        groundingSnapshots.map((snapshot) => (
+                          <article key={snapshot.id} className="research-row">
+                            <p>{snapshot.title}</p>
+                            <small>
+                              {String(snapshot.metadata.note_count || 0)} notes ·{" "}
+                              {String(snapshot.metadata.experiment_run_count || 0)} runs
+                            </small>
                           </article>
                         ))
                       )}
