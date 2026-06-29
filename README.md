@@ -17,6 +17,9 @@ select page regions, and ask questions against the paper context.
 - Select PDF page regions to include visual-region metadata in a question.
 - Ask Codex questions against extracted paper text without exposing retrieval
   chunks in the reader.
+- Render paper answers as Markdown, including headings, lists, tables, links,
+  quotes, and code blocks.
+- Manage a local Codex system prompt for answer language and output format.
 - Use the built-in mock answer mode for local development without an external
   model.
 - Use local Codex through `codex exec` for paper Q&A when the host machine is
@@ -75,6 +78,12 @@ runs `codex exec` in read-only sandbox mode and sends paper metadata, selected
 passage text, selected image-region metadata, and extracted paper text as prompt
 context. The prompt uses a conservative size limit and adds a truncation marker
 when a paper is too long for the local prompt budget.
+
+The web UI also lets you set a local Codex system prompt for paper chat. This is
+stored in browser local storage and sent only when Codex answer mode is used,
+so you can control answer language, Markdown structure, JSON-only output, or
+other response formatting instructions without changing backend environment
+variables.
 
 Codex login is handled by the host CLI, not by the web UI:
 

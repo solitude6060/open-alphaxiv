@@ -796,12 +796,14 @@ class PaperService:
         session_id: int | None = None,
         selected_text: str = "",
         selected_image: dict[str, Any] | None = None,
+        system_prompt: str = "",
         answer_mode: str = "mock",
         codex_options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if session_id is None:
             session_id = self.create_chat_session(paper_id)["id"]
         selected_text = clean_ws(selected_text)[:1800]
+        system_prompt = clean_ws(system_prompt)[:4000]
         user_message_id = self.store.execute(
             "INSERT INTO chat_messages (session_id, role, content, metadata_json, created_at) VALUES (?, 'user', ?, '{}', ?)",
             (session_id, query, utcnow()),
@@ -819,6 +821,7 @@ class PaperService:
                 paper_context,
                 selected_text,
                 selected_image,
+                system_prompt,
                 codex_options or {},
             )
             provider = "codex"
@@ -837,6 +840,7 @@ class PaperService:
             "retrieval": ranked,
             "selected_text_preview": selected_text[:240],
             "selected_image": selected_image or None,
+            "system_prompt_preview": system_prompt[:240] if answer_mode == "codex" else "",
             "user_message_id": user_message_id,
             **run_metadata,
         }
@@ -1050,6 +1054,7 @@ def codex_answer(
     paper_context: str,
     selected_text: str,
     selected_image: dict[str, Any] | None,
+    system_prompt: str,
     options: dict[str, Any],
 ) -> tuple[str, dict[str, Any]]:
     if not options.get("enabled"):
@@ -1066,7 +1071,14 @@ def codex_answer(
     if sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
         sandbox = "read-only"
     model = str(options.get("model") or "")
-    prompt = build_codex_paper_prompt(paper, query, paper_context, selected_text, selected_image)
+    prompt = build_codex_paper_prompt(
+        paper,
+        query,
+        paper_context,
+        selected_text,
+        selected_image,
+        system_prompt,
+    )
     command = [
         resolved_cli,
         "exec",
@@ -1119,6 +1131,7 @@ def codex_answer(
         "codex_stderr_preview": clean_ws(result.stderr)[-500:],
         "context_strategy": "full_text",
         "paper_context_chars": len(paper_context),
+        "system_prompt_chars": len(system_prompt),
         "model": model or "codex-local-agent",
     }
 
@@ -1129,6 +1142,7 @@ def build_codex_paper_prompt(
     paper_context: str,
     selected_text: str,
     selected_image: dict[str, Any] | None,
+    system_prompt: str = "",
 ) -> str:
     context_limit = 75_000
     clean_context = clean_extracted_text(paper_context)
@@ -1140,6 +1154,7 @@ def build_codex_paper_prompt(
     else:
         context = "(No extracted paper text is available.)"
     selected = clean_ws(selected_text)[:1800] or "(none)"
+    custom_instructions = clean_ws(system_prompt)[:4000] or "(none)"
     image = format_selected_image(selected_image)
     return textwrap.dedent(
         f"""
@@ -1151,6 +1166,9 @@ def build_codex_paper_prompt(
         - If the evidence is insufficient, say exactly what is missing.
         - Prefer concise answers grounded in the paper context over retrieval-style chunk citations.
         - Keep the answer concise and technical.
+
+        User-configured system prompt:
+        {custom_instructions}
 
         Paper:
         Title: {paper['title']}

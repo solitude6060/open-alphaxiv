@@ -29,6 +29,24 @@ import {
 import "./styles.css";
 
 const API_URL = import.meta.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const CODEX_SYSTEM_PROMPT_STORAGE_KEY = "open-alphaxiv.codexSystemPrompt";
+const CODEX_PROMPT_PRESETS = [
+  {
+    label: "Markdown zh-TW",
+    value:
+      "Answer in Traditional Chinese (Taiwan). Use Markdown with short headings and bullet lists when useful. Avoid Simplified Chinese. Keep technical terms precise and define uncommon terms briefly."
+  },
+  {
+    label: "Structured JSON",
+    value:
+      'Return valid JSON only with this shape: {"summary": string, "evidence": string[], "limitations": string[]}. Do not wrap the JSON in Markdown fences.'
+  },
+  {
+    label: "Concise English",
+    value:
+      "Answer in English. Use concise Markdown bullets. Separate claims from evidence and note missing information explicitly."
+  }
+];
 
 type Paper = {
   id: number;
@@ -163,6 +181,9 @@ function App() {
   const [source, setSource] = useState("https://arxiv.org/abs/2201.08239");
   const [query, setQuery] = useState("What is the core contribution?");
   const [answerMode, setAnswerMode] = useState<"mock" | "codex">("mock");
+  const [codexSystemPrompt, setCodexSystemPrompt] = useState(() => {
+    return window.localStorage.getItem(CODEX_SYSTEM_PROMPT_STORAGE_KEY) || "";
+  });
   const [selectedText, setSelectedText] = useState("");
   const [selectedImage, setSelectedImage] = useState<ImageSelection | null>(null);
   const [imageDrag, setImageDrag] = useState<ImageDrag | null>(null);
@@ -221,6 +242,10 @@ function App() {
     setChatResult(null);
   }, [selectedPaper?.id]);
 
+  useEffect(() => {
+    window.localStorage.setItem(CODEX_SYSTEM_PROMPT_STORAGE_KEY, codexSystemPrompt);
+  }, [codexSystemPrompt]);
+
   async function createMockProvider() {
     setError("");
     setStatus("Creating provider");
@@ -263,6 +288,7 @@ function App() {
         query,
         selected_text: selectedText,
         selected_image: selectedImage,
+        system_prompt: answerMode === "codex" ? codexSystemPrompt : "",
         answer_mode: answerMode
       })
     });
@@ -593,6 +619,12 @@ function App() {
                     Enable the local Codex agent in the backend before using Codex for paper chat.
                   </p>
                 ) : null}
+                {answerMode === "codex" && codexSystemPrompt.trim() ? (
+                  <div className="prompt-applied">
+                    <KeyRound size={15} />
+                    <span>Custom Codex prompt applied</span>
+                  </div>
+                ) : null}
                 {selectedText ? (
                   <div className="selected-quote">
                     <Quote size={15} />
@@ -621,7 +653,7 @@ function App() {
                       {chatResult.retrieval.provider} / {chatResult.retrieval.model}
                       {chatResult.retrieval.context_strategy === "full_text" ? " / full text" : ""}
                     </div>
-                    <p>{chatResult.answer}</p>
+                    <MarkdownAnswer markdown={chatResult.answer} />
                   </div>
                 ) : null}
               </section>
@@ -696,6 +728,29 @@ function App() {
                 </div>
                 <p className="codex-path">{codexStatus?.codex_cli_path}</p>
                 <p className="codex-boundary">{codexStatus?.integration_boundary}</p>
+                <label className="field-label">
+                  System prompt
+                  <textarea
+                    className="codex-system-prompt"
+                    value={codexSystemPrompt}
+                    onChange={(event) => setCodexSystemPrompt(event.target.value)}
+                    placeholder="Example: Answer in Traditional Chinese. Use Markdown headings, bullets, and tables where useful."
+                  />
+                </label>
+                <div className="prompt-actions" aria-label="Codex prompt presets">
+                  {CODEX_PROMPT_PRESETS.map((preset) => (
+                    <button
+                      key={preset.label}
+                      type="button"
+                      onClick={() => setCodexSystemPrompt(preset.value)}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                  <button type="button" onClick={() => setCodexSystemPrompt("")}>
+                    Clear
+                  </button>
+                </div>
                 {!codexStatus?.codex_chat_available ? (
                   <div className="setup-code">
                     <strong>Docker setup</strong>
@@ -729,6 +784,203 @@ function StatusLine({ label, value }: { label: string; value?: boolean }) {
       <strong>{value ? "yes" : "no"}</strong>
     </div>
   );
+}
+
+function MarkdownAnswer({ markdown }: { markdown: string }) {
+  return <div className="markdown-answer">{renderMarkdownBlocks(markdown)}</div>;
+}
+
+function renderMarkdownBlocks(markdown: string) {
+  const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+  const blocks: React.ReactNode[] = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+
+    if (line.trim().startsWith("```")) {
+      const language = line.trim().slice(3).trim();
+      const code: string[] = [];
+      index += 1;
+      while (index < lines.length && !lines[index].trim().startsWith("```")) {
+        code.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) index += 1;
+      blocks.push(
+        <pre key={`code-${index}`} className="markdown-code">
+          {language ? <span>{language}</span> : null}
+          <code>{code.join("\n")}</code>
+        </pre>
+      );
+      continue;
+    }
+
+    const heading = /^(#{1,3})\s+(.+)$/.exec(line);
+    if (heading) {
+      const level = heading[1].length;
+      const content = renderInlineMarkdown(heading[2], `heading-${index}`);
+      blocks.push(
+        level === 1 ? (
+          <h3 key={`heading-${index}`}>{content}</h3>
+        ) : level === 2 ? (
+          <h4 key={`heading-${index}`}>{content}</h4>
+        ) : (
+          <h5 key={`heading-${index}`}>{content}</h5>
+        )
+      );
+      index += 1;
+      continue;
+    }
+
+    if (isMarkdownTable(lines, index)) {
+      const tableLines = [lines[index]];
+      index += 2;
+      while (index < lines.length && lines[index].includes("|") && lines[index].trim()) {
+        tableLines.push(lines[index]);
+        index += 1;
+      }
+      blocks.push(renderMarkdownTable(tableLines, `table-${index}`));
+      continue;
+    }
+
+    const listMatch = /^(\s*)([-*]|\d+\.)\s+(.+)$/.exec(line);
+    if (listMatch) {
+      const ordered = /^\d+\.$/.test(listMatch[2]);
+      const items: string[] = [];
+      while (index < lines.length) {
+        const item = /^(\s*)([-*]|\d+\.)\s+(.+)$/.exec(lines[index]);
+        if (!item || /^\d+\.$/.test(item[2]) !== ordered) break;
+        items.push(item[3]);
+        index += 1;
+      }
+      const ListTag = ordered ? "ol" : "ul";
+      blocks.push(
+        <ListTag key={`list-${index}`}>
+          {items.map((item, itemIndex) => (
+            <li key={`${index}-${itemIndex}`}>{renderInlineMarkdown(item, `list-${index}-${itemIndex}`)}</li>
+          ))}
+        </ListTag>
+      );
+      continue;
+    }
+
+    if (line.trim().startsWith(">")) {
+      const quote: string[] = [];
+      while (index < lines.length && lines[index].trim().startsWith(">")) {
+        quote.push(lines[index].trim().replace(/^>\s?/, ""));
+        index += 1;
+      }
+      blocks.push(
+        <blockquote key={`quote-${index}`}>
+          {renderInlineMarkdown(quote.join(" "), `quote-${index}`)}
+        </blockquote>
+      );
+      continue;
+    }
+
+    const paragraph: string[] = [];
+    while (index < lines.length && lines[index].trim() && !isMarkdownBlockStart(lines, index)) {
+      paragraph.push(lines[index].trim());
+      index += 1;
+    }
+    blocks.push(
+      <p key={`paragraph-${index}`}>{renderInlineMarkdown(paragraph.join(" "), `paragraph-${index}`)}</p>
+    );
+  }
+
+  return blocks;
+}
+
+function isMarkdownBlockStart(lines: string[], index: number) {
+  const line = lines[index];
+  return (
+    line.trim().startsWith("```") ||
+    /^(#{1,3})\s+/.test(line) ||
+    /^(\s*)([-*]|\d+\.)\s+/.test(line) ||
+    line.trim().startsWith(">") ||
+    isMarkdownTable(lines, index)
+  );
+}
+
+function isMarkdownTable(lines: string[], index: number) {
+  if (index + 1 >= lines.length) return false;
+  return (
+    lines[index].includes("|") &&
+    /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(lines[index + 1])
+  );
+}
+
+function renderMarkdownTable(lines: string[], key: string) {
+  const rows = lines.map(splitMarkdownTableRow);
+  const [header, ...body] = rows;
+  return (
+    <div className="markdown-table-wrap" key={key}>
+      <table>
+        <thead>
+          <tr>
+            {header.map((cell, index) => (
+              <th key={`${key}-head-${index}`}>{renderInlineMarkdown(cell, `${key}-head-${index}`)}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {body.map((row, rowIndex) => (
+            <tr key={`${key}-row-${rowIndex}`}>
+              {row.map((cell, cellIndex) => (
+                <td key={`${key}-cell-${rowIndex}-${cellIndex}`}>
+                  {renderInlineMarkdown(cell, `${key}-cell-${rowIndex}-${cellIndex}`)}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function splitMarkdownTableRow(line: string) {
+  return line
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
+}
+
+function renderInlineMarkdown(text: string, keyPrefix: string) {
+  const nodes: React.ReactNode[] = [];
+  const pattern = /(\[([^\]]+)\]\((https?:\/\/[^\s)]+|mailto:[^\s)]+)\)|`([^`]+)`|\*\*([^*]+)\*\*)/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      nodes.push(text.slice(lastIndex, match.index));
+    }
+    if (match[2] && match[3]) {
+      nodes.push(
+        <a key={`${keyPrefix}-${match.index}`} href={match[3]} target="_blank" rel="noreferrer">
+          {match[2]}
+        </a>
+      );
+    } else if (match[4]) {
+      nodes.push(<code key={`${keyPrefix}-${match.index}`}>{match[4]}</code>);
+    } else if (match[5]) {
+      nodes.push(<strong key={`${keyPrefix}-${match.index}`}>{match[5]}</strong>);
+    }
+    lastIndex = pattern.lastIndex;
+  }
+
+  if (lastIndex < text.length) {
+    nodes.push(text.slice(lastIndex));
+  }
+  return nodes;
 }
 
 function assetUrl(path: string) {

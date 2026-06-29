@@ -49,6 +49,7 @@ class ChatAsk(BaseModel):
     session_id: int | None = None
     selected_text: str = ""
     selected_image: dict[str, Any] | None = None
+    system_prompt: str = ""
     answer_mode: str = "mock"
 
 
@@ -204,6 +205,7 @@ def create_app() -> FastAPI:
                 session_id=payload.session_id,
                 selected_text=payload.selected_text,
                 selected_image=payload.selected_image,
+                system_prompt=payload.system_prompt,
                 answer_mode=payload.answer_mode,
                 codex_options=codex_options(),
             )

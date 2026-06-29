@@ -108,8 +108,10 @@ async def test_chat_messages_accepts_codex_answer_mode_over_http(
         paper_response = await client.post("/api/papers", json={"source": "https://arxiv.org/abs/2201.08239"})
         assert paper_response.status_code == 200
         paper_id = paper_response.json()["id"]
+        captured: dict[str, object] = {}
 
         def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
+            captured["prompt"] = command[-1]
             return SimpleNamespace(returncode=0, stdout="HTTP Codex answer [chunk:1]", stderr="")
 
         monkeypatch.setenv("OPEN_ALPHAXIV_CODEX_ENABLED", "true")
@@ -124,6 +126,7 @@ async def test_chat_messages_accepts_codex_answer_mode_over_http(
                 "query": "Summarize the contribution",
                 "selected_text": "selected API context",
                 "selected_image": {"page": 1, "x": 10, "y": 20, "width": 30, "height": 40},
+                "system_prompt": "Answer in Markdown tables.",
                 "answer_mode": "codex",
             },
         )
@@ -134,6 +137,8 @@ async def test_chat_messages_accepts_codex_answer_mode_over_http(
     assert payload["retrieval"]["provider"] == "codex"
     assert payload["retrieval"]["answer_mode"] == "codex"
     assert payload["retrieval"]["context_strategy"] == "full_text"
+    assert payload["retrieval"]["system_prompt_preview"] == "Answer in Markdown tables."
+    assert "Answer in Markdown tables." in str(captured["prompt"])
 
 
 @pytest.mark.asyncio

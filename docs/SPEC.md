@@ -203,6 +203,7 @@ Message metadata must include:
 - provider
 - model
 - prompt version
+- user-configured Codex system prompt preview when supplied
 - retrieved chunk IDs
 - retrieved literature node IDs
 - token counts when available

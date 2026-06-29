@@ -187,6 +187,7 @@ def test_chat_can_use_codex_answer_mode(service: PaperService, tmp_path: Path, m
         "Explain the contribution",
         selected_text="selected context",
         selected_image={"page": 1, "x": 10, "y": 12, "width": 40, "height": 20},
+        system_prompt="Answer in Traditional Chinese and use Markdown bullets.",
         answer_mode="codex",
         codex_options={
             "enabled": True,
@@ -203,9 +204,13 @@ def test_chat_can_use_codex_answer_mode(service: PaperService, tmp_path: Path, m
     assert answer["retrieval"]["provider"] == "codex"
     assert answer["retrieval"]["answer_mode"] == "codex"
     assert answer["retrieval"]["context_strategy"] == "full_text"
+    assert answer["retrieval"]["system_prompt_chars"] > 0
+    assert answer["retrieval"]["system_prompt_preview"].startswith("Answer in Traditional Chinese")
     assert "Paper context:" in prompt
     assert "scaled dot product attention" in prompt
     assert "Selected image region:" in prompt
+    assert "User-configured system prompt:" in prompt
+    assert "Answer in Traditional Chinese and use Markdown bullets." in prompt
     assert "Retrieved chunks:" not in prompt
     assert command[:2] == ["/usr/local/bin/codex", "exec"]
     assert "--sandbox" in command
