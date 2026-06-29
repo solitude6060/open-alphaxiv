@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -9,6 +10,33 @@ import pytest
 
 from app.services import PaperService, build_codex_paper_prompt, extract_pdf_text_layers, normalize_arxiv_id
 from app.store import Store
+
+
+def minimal_pdf_bytes() -> bytes:
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>",
+    ]
+    content = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for index, obj in enumerate(objects, start=1):
+        offsets.append(len(content))
+        content.extend(f"{index} 0 obj\n".encode("ascii"))
+        content.extend(obj + b"\n")
+        content.extend(b"endobj\n")
+    xref_offset = len(content)
+    content.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+    content.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        content.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    content.extend(
+        (
+            f"trailer\n<< /Root 1 0 R /Size {len(objects) + 1} >>\n"
+            f"startxref\n{xref_offset}\n%%EOF\n"
+        ).encode("ascii")
+    )
+    return bytes(content)
 
 
 @pytest.fixture(autouse=True)
@@ -140,6 +168,81 @@ def test_ingest_paper_creates_ready_chunks_and_graph(service: PaperService) -> N
     graph = service.literature_graph(paper["id"])
     assert len(graph["nodes"]) >= 20
     assert graph["edges"]
+
+
+def test_ingest_uploaded_pdf_creates_ready_upload_paper(service: PaperService) -> None:
+    pdf_bytes = minimal_pdf_bytes()
+    paper = service.ingest_uploaded_pdf(
+        filename="local-transformer-study.pdf",
+        pdf_bytes=pdf_bytes,
+    )
+
+    assert paper["status"] == "ready"
+    assert paper["source_type"] == "upload"
+    assert paper["arxiv_id"] in {"", None}
+    assert paper["title"] == "local transformer study"
+    assert paper["chunk_count"] >= 3
+    assert paper["full_text_available"] is True
+    assert paper["page_image_count"] == 1
+    assert len(service.chunks(paper["id"])) >= 3
+    assert "scaled dot product attention" in service.paper_text(paper["id"])["text"]
+    assert service.paper_pages(paper["id"])[0]["image_url"].endswith(
+        f"/api/papers/{paper['id']}/pages/1.png"
+    )
+    assert service.paper_text_layers(paper["id"])["pages"][0]["words"][0]["text"] == "Attention"
+    artifact = service.store.query_one(
+        "SELECT * FROM artifacts WHERE paper_id = ? AND artifact_type = 'pdf'",
+        (paper["id"],),
+    )
+    assert artifact
+    assert Path(artifact["storage_uri"]).read_bytes() == pdf_bytes
+
+    duplicate = service.ingest_uploaded_pdf(
+        filename="renamed.pdf",
+        pdf_bytes=pdf_bytes,
+    )
+
+    assert duplicate["id"] == paper["id"]
+
+
+def test_ingest_uploaded_pdf_rejects_non_pdf_bytes(service: PaperService) -> None:
+    with pytest.raises(ValueError, match="uploaded file must be a PDF"):
+        service.ingest_uploaded_pdf(filename="notes.txt", pdf_bytes=b"not a PDF")
+
+
+def test_ingest_uploaded_pdf_rejects_unparseable_pdf_header(service: PaperService) -> None:
+    with pytest.raises(ValueError, match="uploaded file must be a parseable PDF"):
+        service.ingest_uploaded_pdf(filename="fake.pdf", pdf_bytes=b"%PDF-1.4 header only")
+
+
+def test_ingest_uploaded_pdf_rejects_oversized_pdf(
+    service: PaperService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.services.MAX_UPLOAD_PDF_BYTES", 10)
+
+    with pytest.raises(ValueError, match="uploaded PDF exceeds 10 byte limit"):
+        service.ingest_uploaded_pdf(filename="large.pdf", pdf_bytes=minimal_pdf_bytes())
+
+
+def test_ingest_uploaded_pdf_retries_stale_incomplete_upload(service: PaperService) -> None:
+    pdf_bytes = minimal_pdf_bytes()
+    source_id = hashlib.sha256(pdf_bytes).hexdigest()
+    stale_id = service.store.execute(
+        """
+        INSERT INTO papers
+            (source_type, source_id, arxiv_id, title, abstract, authors_json,
+             published_at, pdf_url, landing_url, status, summary, created_at, updated_at)
+        VALUES ('upload', ?, '', 'stale', 'stale', '[]', '', '', '', 'indexing', 'stale', 'now', 'now')
+        """,
+        (source_id,),
+    )
+
+    paper = service.ingest_uploaded_pdf(filename="recovered.pdf", pdf_bytes=pdf_bytes)
+
+    assert paper["id"] != stale_id
+    assert paper["status"] == "ready"
+    assert paper["title"] == "recovered"
 
 
 def test_page_text_layers_lazy_generation_is_idempotent(service: PaperService) -> None:

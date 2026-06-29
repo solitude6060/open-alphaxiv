@@ -5,12 +5,13 @@ papers as selectable PDF pages, asking paper questions, and keeping notes in
 one Docker-deployable app.
 
 The app is designed for researchers who want a private paper reading surface:
-paste an arXiv URL, read the imported PDF in the browser, highlight passages or
-select page regions, and ask questions against the paper context.
+paste an arXiv URL or upload a local PDF, read the imported PDF in the browser,
+highlight passages or select page regions, and ask questions against the paper
+context.
 
 ## What You Can Do
 
-- Import a paper from an arXiv URL.
+- Import a paper from an arXiv URL or a local PDF file.
 - Read rendered PDF pages in a two-pane workspace with the assistant beside the
   reader.
 - Highlight selectable PDF text and ask targeted questions about that passage.
@@ -70,6 +71,11 @@ The API stores the paper metadata, downloads the PDF when available, extracts
 text with Poppler, renders page images, creates a transparent page text layer
 for highlighting, creates Markdown content, builds local retrieval data for
 mock mode and graph construction, and makes the paper available in the reader.
+
+You can also choose a local PDF from the import bar. Local uploads use the same
+PDF processing path as arXiv imports: the backend stores the PDF bytes locally,
+extracts text, renders page images, creates selectable page text layers,
+generates Markdown, and indexes the paper for Ask Paper.
 
 The Docker images include `poppler-utils` for PDF text and page-image
 extraction. When running the API directly on the host, install Poppler so
