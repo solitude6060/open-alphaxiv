@@ -763,6 +763,26 @@ def test_research_discussions_grounding_snapshots_and_export(service: PaperServi
     assert "It supports the claim" in exported
 
 
+def test_discussion_message_references_follow_message_lifecycle(service: PaperService) -> None:
+    project = service.create_research_project({"title": "Message lifecycle"})
+    discussion = service.create_research_discussion({"project_id": project["id"], "title": "Lifecycle"})
+    message = service.create_research_discussion_message(discussion["id"], {"content": "Evidence reference"})
+    link = service.create_discussion_research_link(
+        message["id"],
+        {"link_type": "code_path", "relation": "mentions", "target_id": "experiments/baseline.py"},
+    )
+    snapshot = service.create_grounding_snapshot(
+        project["id"],
+        {"title": "Lifecycle snapshot", "discussion_message_id": message["id"]},
+    )
+
+    service.store.execute("DELETE FROM research_discussion_messages WHERE id = ?", (message["id"],))
+
+    assert service.store.query_one("SELECT id FROM research_links WHERE id = ?", (link["id"],)) is None
+    snapshot_row = service.store.query_one("SELECT discussion_message_id FROM grounding_snapshots WHERE id = ?", (snapshot["id"],))
+    assert snapshot_row == {"discussion_message_id": None}
+
+
 def test_grounding_snapshot_rejects_unknown_project(service: PaperService) -> None:
     with pytest.raises(KeyError, match="research project not found"):
         service.create_grounding_snapshot(999, {"title": "Missing project"})

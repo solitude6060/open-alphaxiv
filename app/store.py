@@ -239,7 +239,7 @@ class Store:
                 CREATE TABLE IF NOT EXISTS grounding_snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     project_id INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
-                    discussion_message_id INTEGER,
+                    discussion_message_id INTEGER REFERENCES research_discussion_messages(id) ON DELETE SET NULL,
                     title TEXT NOT NULL,
                     content_markdown TEXT NOT NULL DEFAULT '',
                     metadata_json TEXT NOT NULL DEFAULT '{}',
@@ -250,7 +250,7 @@ class Store:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     project_id INTEGER REFERENCES research_projects(id) ON DELETE CASCADE,
                     note_id INTEGER REFERENCES research_notes(id) ON DELETE CASCADE,
-                    discussion_message_id INTEGER,
+                    discussion_message_id INTEGER REFERENCES research_discussion_messages(id) ON DELETE CASCADE,
                     link_type TEXT NOT NULL,
                     relation TEXT NOT NULL,
                     target_id TEXT NOT NULL DEFAULT '',
