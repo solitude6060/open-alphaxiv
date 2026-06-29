@@ -302,6 +302,50 @@ Constraints:
   `note_id IS NOT NULL OR discussion_message_id IS NOT NULL`.
 - Paper and chat targets must resolve to existing local records.
 
+### ExperimentRun
+
+Structured experiment record scoped to a research project.
+
+Fields:
+
+- `id`
+- `project_id`
+- `title`
+- `status`: `planned`, `running`, `completed`, `failed`, `archived`
+- `hypothesis`
+- `dataset`
+- `code_ref`
+- `command`
+- `parameters_json`
+- `metrics_json`
+- `summary`
+- `started_at`
+- `completed_at`
+- `created_at`
+- `updated_at`
+
+Constraints:
+
+- Runs are archived by status, not hard-deleted through the UI.
+- Metrics and parameters are stored as structured JSON so later discussion and
+  search workflows can use them without parsing note prose.
+
+### ExperimentArtifact
+
+Reference to an artifact produced by an experiment run.
+
+Fields:
+
+- `id`
+- `run_id`
+- `artifact_type`: `metrics`, `checkpoint`, `figure`, `table`, `log`,
+  `model`, `dataset`, `report`, `other`
+- `uri`
+- `label`
+- `description`
+- `metadata_json`
+- `created_at`
+
 ## API Surface
 
 ### Paper APIs
@@ -374,6 +418,16 @@ Constraints:
 - `GET /api/research/notes/{note_id}/links`
 - `POST /api/papers/{paper_id}/research-notes`
 - `POST /api/chat/messages/{message_id}/research-note`
+
+### Experiment APIs
+
+- `POST /api/experiments/runs`
+- `GET /api/experiments/runs`
+- `GET /api/experiments/runs/{run_id}`
+- `PATCH /api/experiments/runs/{run_id}`
+- `POST /api/experiments/runs/{run_id}/research-note`
+- `POST /api/experiments/runs/{run_id}/artifacts`
+- `GET /api/experiments/runs/{run_id}/artifacts`
 
 ### GitHub APIs
 
@@ -537,6 +591,8 @@ MVP implementation should include:
 - Integration tests for research projects, notes, evidence links, paper-passage
   capture, Ask Paper answer capture, archival status updates, and Markdown
   project export.
+- Integration tests for experiment runs, artifact references, experiment
+  evidence links, run-to-note capture, and project export.
 - End-to-end test for the main flow:
   - configure provider
   - ingest paper

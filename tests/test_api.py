@@ -411,6 +411,77 @@ async def test_research_link_rejects_unknown_paper_over_http(app: FastAPI) -> No
 
 
 @pytest.mark.asyncio
+async def test_experiment_runs_can_be_recorded_over_http(app: FastAPI) -> None:
+    async with asgi_client(app) as client:
+        project_response = await client.post("/api/research/projects", json={"title": "HTTP experiments"})
+        project = project_response.json()
+        run_response = await client.post(
+            "/api/experiments/runs",
+            json={
+                "project_id": project["id"],
+                "title": "HTTP attention run",
+                "hypothesis": "Attention should improve BLEU.",
+                "dataset": "WMT14 en-de",
+                "code_ref": "git:def456",
+                "command": "python train.py --seed 3",
+                "parameters": {"seed": 3},
+                "metrics": {"bleu": 28.8},
+                "summary": "First HTTP-recorded run.",
+            },
+        )
+        assert run_response.status_code == 200
+        run = run_response.json()
+        update_response = await client.patch(
+            f"/api/experiments/runs/{run['id']}",
+            json={"status": "completed", "metrics": {"bleu": 29.0}, "summary": "Run completed."},
+        )
+        artifact_response = await client.post(
+            f"/api/experiments/runs/{run['id']}/artifacts",
+            json={
+                "artifact_type": "metrics",
+                "uri": "file:///runs/http-attention/metrics.json",
+                "label": "HTTP metrics",
+                "metadata": {"rows": 10},
+            },
+        )
+        runs_response = await client.get(f"/api/experiments/runs?project_id={project['id']}")
+        artifacts_response = await client.get(f"/api/experiments/runs/{run['id']}/artifacts")
+        note_response = await client.post(
+            f"/api/experiments/runs/{run['id']}/research-note",
+            json={"project_id": project["id"], "title": "HTTP experiment note"},
+        )
+        links_response = await client.get(f"/api/research/notes/{note_response.json()['id']}/links")
+        export_response = await client.get(f"/api/research/projects/{project['id']}/export.md")
+
+    assert run_response.status_code == 200
+    assert run["status"] == "planned"
+    assert update_response.status_code == 200
+    assert update_response.json()["metrics"]["bleu"] == 29.0
+    assert artifact_response.status_code == 200
+    assert artifact_response.json()["label"] == "HTTP metrics"
+    assert runs_response.status_code == 200
+    assert len(runs_response.json()) == 1
+    assert artifacts_response.status_code == 200
+    assert artifacts_response.json()[0]["metadata"]["rows"] == 10
+    assert note_response.status_code == 200
+    assert links_response.json()[0]["link_type"] == "experiment_run"
+    assert "HTTP attention run" in export_response.text
+    assert "HTTP metrics" in export_response.text
+
+
+@pytest.mark.asyncio
+async def test_experiment_artifact_rejects_unknown_run_over_http(app: FastAPI) -> None:
+    async with asgi_client(app) as client:
+        response = await client.post(
+            "/api/experiments/runs/999/artifacts",
+            json={"artifact_type": "metrics", "uri": "file:///missing.json", "label": "Missing"},
+        )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "experiment run not found"
+
+
+@pytest.mark.asyncio
 async def test_chat_messages_rejects_invalid_answer_mode_over_http(app: FastAPI) -> None:
     async with asgi_client(app) as client:
         paper_response = await client.post("/api/papers", json={"source": "https://arxiv.org/abs/2201.08239"})

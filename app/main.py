@@ -130,6 +130,49 @@ class ChatMessageResearchNoteCreate(BaseModel):
     tags: list[str] = Field(default_factory=list)
 
 
+class ExperimentRunCreate(BaseModel):
+    project_id: int
+    title: str
+    status: str = "planned"
+    hypothesis: str = ""
+    dataset: str = ""
+    code_ref: str = ""
+    command: str = ""
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    summary: str = ""
+    started_at: str = ""
+    completed_at: str = ""
+
+
+class ExperimentRunUpdate(BaseModel):
+    title: str | None = None
+    status: str | None = None
+    hypothesis: str | None = None
+    dataset: str | None = None
+    code_ref: str | None = None
+    command: str | None = None
+    parameters: dict[str, Any] | None = None
+    metrics: dict[str, Any] | None = None
+    summary: str | None = None
+    started_at: str | None = None
+    completed_at: str | None = None
+
+
+class ExperimentArtifactCreate(BaseModel):
+    artifact_type: str = "other"
+    uri: str = ""
+    label: str = ""
+    description: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExperimentRunResearchNoteCreate(BaseModel):
+    project_id: int | None = None
+    title: str = ""
+    tags: list[str] = Field(default_factory=list)
+
+
 @lru_cache(maxsize=1)
 def service() -> PaperService:
     settings = get_settings()
@@ -493,6 +536,73 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/experiments/runs")
+    async def create_experiment_run(payload: ExperimentRunCreate) -> dict[str, Any]:
+        try:
+            return await to_thread(service().create_experiment_run, payload.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+
+    @app.get("/api/experiments/runs")
+    async def list_experiment_runs(
+        project_id: int | None = None,
+        status: str = "",
+    ) -> list[dict[str, Any]]:
+        try:
+            return await to_thread(service().list_experiment_runs, project_id, status)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/experiments/runs/{run_id}")
+    async def get_experiment_run(run_id: int) -> dict[str, Any]:
+        try:
+            return await to_thread(service().get_experiment_run, run_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+
+    @app.patch("/api/experiments/runs/{run_id}")
+    async def update_experiment_run(run_id: int, payload: ExperimentRunUpdate) -> dict[str, Any]:
+        try:
+            return await to_thread(
+                service().update_experiment_run,
+                run_id,
+                payload.model_dump(exclude_unset=True),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+
+    @app.post("/api/experiments/runs/{run_id}/artifacts")
+    async def create_experiment_artifact(run_id: int, payload: ExperimentArtifactCreate) -> dict[str, Any]:
+        try:
+            return await to_thread(service().create_experiment_artifact, run_id, payload.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+
+    @app.get("/api/experiments/runs/{run_id}/artifacts")
+    async def experiment_run_artifacts(run_id: int) -> list[dict[str, Any]]:
+        try:
+            return await to_thread(service().experiment_run_artifacts, run_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+
+    @app.post("/api/experiments/runs/{run_id}/research-note")
+    async def create_experiment_research_note(
+        run_id: int,
+        payload: ExperimentRunResearchNoteCreate,
+    ) -> dict[str, Any]:
+        try:
+            return await to_thread(service().create_experiment_research_note, run_id, payload.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
 
     @app.post("/api/papers/{paper_id}/literature-graph/build")
     def build_graph(paper_id: int) -> dict[str, Any]:
