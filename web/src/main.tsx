@@ -336,7 +336,7 @@ function App() {
     });
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(text || response.statusText);
+      throw new Error(errorMessageFromResponse(text, response.statusText));
     }
     const paper = (await response.json()) as Paper;
     setUploadFile(null);
@@ -1167,6 +1167,15 @@ function renderInlineMarkdown(text: string, keyPrefix: string) {
 
 function assetUrl(path: string) {
   return path.startsWith("http") ? path : `${API_URL}${path}`;
+}
+
+function errorMessageFromResponse(text: string, fallback: string) {
+  try {
+    const payload = JSON.parse(text) as { detail?: string };
+    return payload.detail || text || fallback;
+  } catch {
+    return text || fallback;
+  }
 }
 
 function paperSourceLabel(paper: Paper) {

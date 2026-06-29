@@ -5,6 +5,7 @@ import math
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import textwrap
@@ -42,6 +43,7 @@ STOPWORDS = {
     "our",
     "their",
 }
+MAX_UPLOAD_PDF_BYTES = 50_000_000
 
 
 def normalize_arxiv_id(source: str) -> str:
@@ -158,8 +160,31 @@ def upload_title_from_filename(filename: str, fallback: str) -> str:
 
 
 def validate_pdf_bytes(pdf_bytes: bytes) -> None:
+    if len(pdf_bytes) > MAX_UPLOAD_PDF_BYTES:
+        raise ValueError(upload_size_error_message(MAX_UPLOAD_PDF_BYTES))
     if not pdf_bytes.lstrip().startswith(b"%PDF"):
         raise ValueError("uploaded file must be a PDF")
+    pdfinfo = shutil.which("pdfinfo")
+    if not pdfinfo:
+        return
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf") as handle:
+            handle.write(pdf_bytes)
+            handle.flush()
+            result = subprocess.run(
+                [pdfinfo, handle.name],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+    except (OSError, subprocess.TimeoutExpired):
+        raise ValueError("uploaded file must be a parseable PDF")
+    if result.returncode != 0:
+        raise ValueError("uploaded file must be a parseable PDF")
+
+
+def upload_size_error_message(limit_bytes: int) -> str:
+    return f"uploaded PDF exceeds {limit_bytes} byte limit"
 
 
 def clean_extracted_text(text: str) -> str:
@@ -477,7 +502,10 @@ class PaperService:
             "SELECT id FROM papers WHERE source_type = 'upload' AND source_id = ?", (source_id,)
         )
         if existing:
-            return self.get_paper(existing["id"])
+            paper = self.get_paper(existing["id"])
+            if paper["status"] == "ready":
+                return paper
+            self.store.execute("DELETE FROM papers WHERE id = ?", (existing["id"],))
 
         display_title = clean_ws(title) or upload_title_from_filename(filename, f"Uploaded paper {source_id[:12]}")
         meta = {
@@ -492,24 +520,32 @@ class PaperService:
             "landing_url": "",
         }
         now = utcnow()
-        paper_id = self.store.execute(
-            """
-            INSERT INTO papers
-                (source_type, source_id, arxiv_id, title, abstract, authors_json,
-                 published_at, pdf_url, landing_url, status, summary, created_at, updated_at)
-            VALUES ('upload', ?, '', ?, ?, ?, ?, '', '', 'indexing', ?, ?, ?)
-            """,
-            (
-                source_id,
-                meta["title"],
-                meta["abstract"],
-                dumps(meta["authors"]),
-                meta["published_at"],
-                summarize(meta["title"], meta["abstract"]),
-                now,
-                now,
-            ),
-        )
+        try:
+            paper_id = self.store.execute(
+                """
+                INSERT INTO papers
+                    (source_type, source_id, arxiv_id, title, abstract, authors_json,
+                     published_at, pdf_url, landing_url, status, summary, created_at, updated_at)
+                VALUES ('upload', ?, '', ?, ?, ?, ?, '', '', 'indexing', ?, ?, ?)
+                """,
+                (
+                    source_id,
+                    meta["title"],
+                    meta["abstract"],
+                    dumps(meta["authors"]),
+                    meta["published_at"],
+                    summarize(meta["title"], meta["abstract"]),
+                    now,
+                    now,
+                ),
+            )
+        except sqlite3.IntegrityError:
+            existing = self.store.query_one(
+                "SELECT id FROM papers WHERE source_type = 'upload' AND source_id = ?", (source_id,)
+            )
+            if existing:
+                return self.get_paper(existing["id"])
+            raise
         self._index_paper_artifacts(
             paper_id=paper_id,
             paper_dir=self.storage_dir / "papers" / str(paper_id),
