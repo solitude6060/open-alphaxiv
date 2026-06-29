@@ -53,6 +53,77 @@ class ChatAsk(BaseModel):
     answer_mode: str = "mock"
 
 
+class ResearchProjectCreate(BaseModel):
+    title: str
+    slug: str = ""
+    status: str = "active"
+    goal: str = ""
+    current_state: str = ""
+
+
+class ResearchProjectUpdate(BaseModel):
+    title: str | None = None
+    slug: str | None = None
+    status: str | None = None
+    goal: str | None = None
+    current_state: str | None = None
+
+
+class ResearchQuestionCreate(BaseModel):
+    project_id: int
+    question: str
+    status: str = "open"
+    current_answer: str = ""
+
+
+class ResearchQuestionUpdate(BaseModel):
+    question: str | None = None
+    status: str | None = None
+    current_answer: str | None = None
+
+
+class ResearchNoteCreate(BaseModel):
+    project_id: int
+    title: str
+    body_markdown: str = ""
+    note_type: str = "idea"
+    status: str = "active"
+    tags: list[str] = Field(default_factory=list)
+
+
+class ResearchNoteUpdate(BaseModel):
+    title: str | None = None
+    body_markdown: str | None = None
+    note_type: str | None = None
+    status: str | None = None
+    tags: list[str] | None = None
+
+
+class ResearchLinkCreate(BaseModel):
+    link_type: str
+    relation: str
+    target_id: str = ""
+    target_uri: str = ""
+    label: str = ""
+    quote: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class PaperResearchNoteCreate(BaseModel):
+    project_id: int
+    title: str = ""
+    selected_text: str = ""
+    page_number: int | None = None
+    selected_image: dict[str, Any] | None = None
+    tags: list[str] = Field(default_factory=list)
+
+
+class ChatMessageResearchNoteCreate(BaseModel):
+    project_id: int
+    title: str = ""
+    tags: list[str] = Field(default_factory=list)
+
+
 @lru_cache(maxsize=1)
 def service() -> PaperService:
     settings = get_settings()
@@ -253,6 +324,145 @@ def create_app() -> FastAPI:
         import json
 
         return json.loads(row["metadata_json"])
+
+    @app.post("/api/research/projects")
+    async def create_research_project(payload: ResearchProjectCreate) -> dict[str, Any]:
+        try:
+            return await to_thread(service().create_research_project, payload.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/research/projects")
+    async def list_research_projects(status: str = "") -> list[dict[str, Any]]:
+        return await to_thread(service().list_research_projects, status)
+
+    @app.get("/api/research/projects/{project_id}")
+    async def get_research_project(project_id: int) -> dict[str, Any]:
+        try:
+            return await to_thread(service().get_research_project, project_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.patch("/api/research/projects/{project_id}")
+    async def update_research_project(project_id: int, payload: ResearchProjectUpdate) -> dict[str, Any]:
+        try:
+            return await to_thread(
+                service().update_research_project,
+                project_id,
+                payload.model_dump(exclude_unset=True),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/research/projects/{project_id}/export.md")
+    async def export_research_project(project_id: int) -> Response:
+        try:
+            markdown = await to_thread(service().export_research_project, project_id)
+            return Response(content=markdown, media_type="text/markdown")
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/research/questions")
+    async def create_research_question(payload: ResearchQuestionCreate) -> dict[str, Any]:
+        try:
+            return await to_thread(service().create_research_question, payload.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/research/questions")
+    async def list_research_questions(project_id: int | None = None, status: str = "") -> list[dict[str, Any]]:
+        return await to_thread(service().list_research_questions, project_id, status)
+
+    @app.patch("/api/research/questions/{question_id}")
+    async def update_research_question(question_id: int, payload: ResearchQuestionUpdate) -> dict[str, Any]:
+        try:
+            return await to_thread(
+                service().update_research_question,
+                question_id,
+                payload.model_dump(exclude_unset=True),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/research/notes")
+    async def create_research_note(payload: ResearchNoteCreate) -> dict[str, Any]:
+        try:
+            return await to_thread(service().create_research_note, payload.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/research/notes")
+    async def list_research_notes(
+        project_id: int | None = None,
+        q: str = "",
+        status: str = "",
+        note_type: str = "",
+        tag: str = "",
+    ) -> list[dict[str, Any]]:
+        return await to_thread(service().list_research_notes, project_id, q, status, note_type, tag)
+
+    @app.get("/api/research/notes/{note_id}")
+    async def get_research_note(note_id: int) -> dict[str, Any]:
+        try:
+            return await to_thread(service().get_research_note, note_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.patch("/api/research/notes/{note_id}")
+    async def update_research_note(note_id: int, payload: ResearchNoteUpdate) -> dict[str, Any]:
+        try:
+            return await to_thread(service().update_research_note, note_id, payload.model_dump(exclude_unset=True))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/research/notes/{note_id}/links")
+    async def create_research_link(note_id: int, payload: ResearchLinkCreate) -> dict[str, Any]:
+        try:
+            return await to_thread(service().create_research_link, note_id, payload.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except KeyError as exc:
+            detail = str(exc.args[0])
+            status_code = 404 if detail == "research note not found" else 400
+            raise HTTPException(status_code=status_code, detail=detail) from exc
+
+    @app.get("/api/research/notes/{note_id}/links")
+    async def research_note_links(note_id: int) -> list[dict[str, Any]]:
+        try:
+            return await to_thread(service().research_note_links, note_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/papers/{paper_id}/research-notes")
+    async def create_paper_research_note(paper_id: int, payload: PaperResearchNoteCreate) -> dict[str, Any]:
+        try:
+            return await to_thread(service().create_paper_research_note, paper_id, payload.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/chat/messages/{message_id}/research-note")
+    async def create_chat_message_research_note(
+        message_id: int,
+        payload: ChatMessageResearchNoteCreate,
+    ) -> dict[str, Any]:
+        try:
+            return await to_thread(service().create_chat_message_research_note, message_id, payload.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/api/papers/{paper_id}/literature-graph/build")
     def build_graph(paper_id: int) -> dict[str, Any]:

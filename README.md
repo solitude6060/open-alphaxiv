@@ -20,6 +20,11 @@ select page regions, and ask questions against the paper context.
 - Render paper answers as Markdown, including headings, lists, tables, links,
   quotes, and code blocks.
 - Manage a local Codex system prompt for answer language and output format.
+- Create research projects, track research questions, and keep persistent
+  Markdown notes beside the paper reader.
+- Save highlighted paper passages and Ask Paper answers into research notes
+  with evidence links.
+- Export a research project as readable Markdown with paper and chat citations.
 - Use the built-in mock answer mode for local development without an external
   model.
 - Use local Codex through `codex exec` for paper Q&A when the host machine is
@@ -140,6 +145,13 @@ Build the web app:
 cd web
 npm install
 npm run build
+```
+
+Run the web app against a non-default local API port:
+
+```bash
+cd web
+VITE_API_URL=http://127.0.0.1:18000 npm run dev -- --host 127.0.0.1 --port 3310
 ```
 
 Check the Codex Docker mount setup:

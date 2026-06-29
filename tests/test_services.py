@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sqlite3
 import subprocess
 from types import SimpleNamespace
 
@@ -471,3 +472,122 @@ def test_bookmark_tags_and_export(service: PaperService) -> None:
     assert tagged["tags"] == ["graphs", "rag"]
     assert "# " in exported
     assert "Literature Graph Snapshot" in exported
+
+
+def test_research_project_note_links_and_export(service: PaperService) -> None:
+    paper = service.ingest_paper("2201.08239")
+    project = service.create_research_project(
+        {
+            "title": "Transformer reproduction",
+            "goal": "Track paper evidence and implementation progress.",
+            "current_state": "Reading the attention paper.",
+        }
+    )
+    question = service.create_research_question(
+        {
+            "project_id": project["id"],
+            "question": "Which architectural choices should be reproduced first?",
+            "current_answer": "Start with attention and positional encoding.",
+        }
+    )
+    note = service.create_research_note(
+        {
+            "project_id": project["id"],
+            "title": "Attention evidence",
+            "body_markdown": "The selected passage motivates the implementation plan.",
+            "note_type": "literature_note",
+            "tags": ["attention", "implementation"],
+        }
+    )
+    link = service.create_research_link(
+        note["id"],
+        {
+            "link_type": "paper_passage",
+            "relation": "supports",
+            "target_id": str(paper["id"]),
+            "label": paper["title"],
+            "quote": "scaled dot product attention",
+            "metadata": {"paper_id": paper["id"], "page_number": 3},
+        },
+    )
+
+    assert project["slug"] == "transformer-reproduction"
+    assert project["status"] == "active"
+    assert question["status"] == "open"
+    assert note["tags"] == ["attention", "implementation"]
+    assert link["relation"] == "supports"
+    assert link["metadata"]["page_number"] == 3
+    assert service.research_note_links(note["id"])[0]["quote"] == "scaled dot product attention"
+
+    exported = service.export_research_project(project["id"])
+
+    assert "# Transformer reproduction" in exported
+    assert "## Questions" in exported
+    assert "Which architectural choices" in exported
+    assert "## Notes" in exported
+    assert "[Deterministic test paper 2201.08239, p.3]" in exported
+    assert "scaled dot product attention" in exported
+
+
+def test_paper_passage_and_chat_answer_can_be_captured_as_research_notes(
+    service: PaperService,
+) -> None:
+    paper = service.ingest_paper("2201.08239")
+    project = service.create_research_project({"title": "Evidence capture"})
+    passage_note = service.create_paper_research_note(
+        paper["id"],
+        {
+            "project_id": project["id"],
+            "title": "Selected passage",
+            "selected_text": "The model uses scaled dot product attention.",
+            "page_number": 2,
+        },
+    )
+    answer = service.ask(paper["id"], "What should I remember?")
+    answer_note = service.create_chat_message_research_note(
+        answer["message_id"],
+        {
+            "project_id": project["id"],
+            "title": "Assistant takeaway",
+        },
+    )
+
+    passage_links = service.research_note_links(passage_note["id"])
+    answer_links = service.research_note_links(answer_note["id"])
+
+    assert passage_note["body_markdown"].startswith("The model uses scaled dot product attention.")
+    assert passage_links[0]["link_type"] == "paper_passage"
+    assert passage_links[0]["metadata"]["page_number"] == 2
+    assert answer["answer"] in answer_note["body_markdown"]
+    assert answer_links[0]["link_type"] == "chat_message"
+    assert answer_links[0]["target_id"] == str(answer["message_id"])
+
+
+def test_research_archive_uses_status_updates(service: PaperService) -> None:
+    project = service.create_research_project({"title": "Archive flow"})
+    note = service.create_research_note(
+        {
+            "project_id": project["id"],
+            "title": "Temporary note",
+            "body_markdown": "Keep this in history.",
+        }
+    )
+
+    archived_note = service.update_research_note(note["id"], {"status": "archived"})
+    archived_project = service.update_research_project(project["id"], {"status": "archived"})
+
+    assert archived_note["status"] == "archived"
+    assert archived_project["status"] == "archived"
+    assert service.get_research_note(note["id"])["body_markdown"] == "Keep this in history."
+
+
+def test_research_links_require_note_or_discussion_owner(service: PaperService) -> None:
+    with pytest.raises(sqlite3.IntegrityError):
+        service.store.execute(
+            """
+            INSERT INTO research_links
+                (project_id, note_id, discussion_message_id, link_type, relation, target_id,
+                 target_uri, label, quote, metadata_json, created_at)
+            VALUES (NULL, NULL, NULL, 'paper', 'supports', '1', '', '', '', '{}', 'now')
+            """
+        )

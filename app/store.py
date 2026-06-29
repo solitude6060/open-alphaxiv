@@ -154,6 +154,55 @@ class Store:
                     score REAL NOT NULL,
                     explanation TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS research_projects (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    slug TEXT NOT NULL UNIQUE,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    goal TEXT NOT NULL DEFAULT '',
+                    current_state TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS research_questions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                    question TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    current_answer TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS research_notes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+                    title TEXT NOT NULL,
+                    body_markdown TEXT NOT NULL DEFAULT '',
+                    note_type TEXT NOT NULL DEFAULT 'idea',
+                    status TEXT NOT NULL DEFAULT 'active',
+                    tags_json TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS research_links (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER REFERENCES research_projects(id) ON DELETE CASCADE,
+                    note_id INTEGER REFERENCES research_notes(id) ON DELETE CASCADE,
+                    discussion_message_id INTEGER,
+                    link_type TEXT NOT NULL,
+                    relation TEXT NOT NULL,
+                    target_id TEXT NOT NULL DEFAULT '',
+                    target_uri TEXT NOT NULL DEFAULT '',
+                    label TEXT NOT NULL DEFAULT '',
+                    quote TEXT NOT NULL DEFAULT '',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    CHECK (note_id IS NOT NULL OR discussion_message_id IS NOT NULL)
+                );
                 """
             )
 
@@ -180,4 +229,3 @@ def loads(value: str | None, default: Any) -> Any:
     if not value:
         return default
     return json.loads(value)
-
