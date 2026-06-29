@@ -107,8 +107,8 @@ Fields:
 
 - `id`
 - `paper_id`
-- `artifact_type`: `pdf`, `pdf_text`, `page_image`, `markdown`, `summary`,
-  `notes`, `graph_snapshot`, `export`
+- `artifact_type`: `pdf`, `pdf_text`, `page_image`, `page_text_layers`,
+  `markdown`, `summary`, `notes`, `graph_snapshot`, `export`
 - `storage_uri`
 - `content_hash`
 - `metadata_json`
@@ -241,6 +241,7 @@ Fields:
 - `GET /api/papers/{paper_id}/fulltext`
 - `GET /api/papers/{paper_id}/pages`
 - `GET /api/papers/{paper_id}/pages/{page_number}.png`
+- `GET /api/papers/{paper_id}/pages/{page_number}/text`
 - `POST /api/papers/{paper_id}/retry`
 - `POST /api/papers/{paper_id}/bookmark`
 - `POST /api/papers/{paper_id}/tags`

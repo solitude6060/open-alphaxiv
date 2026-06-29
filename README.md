@@ -1,19 +1,19 @@
 # Open AlphaXiv
 
 Open AlphaXiv is a local-first research paper workspace for reading arXiv
-papers, importing PDF text and page images, asking paper questions, and keeping
-notes in one Docker-deployable app.
+papers as selectable PDF pages, asking paper questions, and keeping notes in
+one Docker-deployable app.
 
 The app is designed for researchers who want a private paper reading surface:
-paste an arXiv URL, read the imported paper in the browser, select passages or
-page regions, and ask questions against the paper context.
+paste an arXiv URL, read the imported PDF in the browser, highlight passages or
+select page regions, and ask questions against the paper context.
 
 ## What You Can Do
 
 - Import a paper from an arXiv URL.
-- Read extracted paper text in a two-pane workspace with the assistant beside
-  the reader.
-- Select text from the paper and ask targeted questions about that passage.
+- Read rendered PDF pages in a two-pane workspace with the assistant beside the
+  reader.
+- Highlight selectable PDF text and ask targeted questions about that passage.
 - Select PDF page regions to include visual-region metadata in a question.
 - Ask Codex questions against extracted paper text without exposing retrieval
   chunks in the reader.
@@ -59,9 +59,9 @@ https://arxiv.org/abs/1706.03762
 ```
 
 The API stores the paper metadata, downloads the PDF when available, extracts
-text with Poppler, renders page images, creates Markdown content, builds local
-retrieval data for mock mode and graph construction, and makes the paper
-available in the reader.
+text with Poppler, renders page images, creates a transparent page text layer
+for highlighting, creates Markdown content, builds local retrieval data for
+mock mode and graph construction, and makes the paper available in the reader.
 
 The Docker images include `poppler-utils` for PDF text and page-image
 extraction. When running the API directly on the host, install Poppler so

@@ -41,6 +41,17 @@ def deterministic_arxiv_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
         return [page]
 
     monkeypatch.setattr("app.services.render_pdf_page_images", page_images)
+    monkeypatch.setattr(
+        "app.services.extract_pdf_text_layers",
+        lambda path, max_pages=12, timeout=30.0: [
+            {
+                "page_number": 1,
+                "width": 612.0,
+                "height": 792.0,
+                "words": [{"text": "Attention", "x": 10.0, "y": 12.0, "width": 8.0, "height": 1.8}],
+            }
+        ],
+    )
 
 
 @pytest.fixture()
@@ -134,12 +145,16 @@ async def test_paper_full_text_and_page_manifest_over_http(app: FastAPI) -> None
 
         text_response = await client.get(f"/api/papers/{paper_id}/fulltext")
         pages_response = await client.get(f"/api/papers/{paper_id}/pages")
+        text_layer_response = await client.get(f"/api/papers/{paper_id}/pages/1/text")
         image_response = await client.get(f"/api/papers/{paper_id}/pages/1.png")
 
     assert text_response.status_code == 200
     assert "attention layers" in text_response.json()["text"]
     assert pages_response.status_code == 200
     assert pages_response.json()[0]["image_url"].endswith(f"/api/papers/{paper_id}/pages/1.png")
+    assert pages_response.json()[0]["text_layer_url"].endswith(f"/api/papers/{paper_id}/pages/1/text")
+    assert text_layer_response.status_code == 200
+    assert text_layer_response.json()["words"][0]["text"] == "Attention"
     assert image_response.status_code == 200
     assert image_response.headers["content-type"] == "image/png"
 

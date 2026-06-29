@@ -10,6 +10,7 @@ import tempfile
 import textwrap
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -217,6 +218,84 @@ def render_pdf_page_images(pdf_path: Path, output_dir: Path, max_pages: int = 12
     return normalized
 
 
+def extract_pdf_text_layers(pdf_path: Path, max_pages: int = 12, timeout: float = 30.0) -> list[dict[str, Any]]:
+    pdftotext = shutil.which("pdftotext")
+    if not pdftotext:
+        return []
+    try:
+        result = subprocess.run(
+            [
+                pdftotext,
+                "-bbox-layout",
+                "-f",
+                "1",
+                "-l",
+                str(max_pages),
+                str(pdf_path),
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0 or not result.stdout.strip():
+        return []
+    try:
+        root = ET.fromstring(result.stdout)
+    except ET.ParseError:
+        return []
+    pages: list[dict[str, Any]] = []
+    for page in root.iter():
+        if strip_xml_namespace(page.tag) != "page":
+            continue
+        width = parse_float(page.attrib.get("width"))
+        height = parse_float(page.attrib.get("height"))
+        words = []
+        for word in page.iter():
+            if strip_xml_namespace(word.tag) != "word":
+                continue
+            text = "".join(word.itertext()).strip()
+            if not text:
+                continue
+            x_min = parse_float(word.attrib.get("xMin"))
+            y_min = parse_float(word.attrib.get("yMin"))
+            x_max = parse_float(word.attrib.get("xMax"))
+            y_max = parse_float(word.attrib.get("yMax"))
+            if width <= 0 or height <= 0 or x_max <= x_min or y_max <= y_min:
+                continue
+            words.append(
+                {
+                    "text": text,
+                    "x": round((x_min / width) * 100, 4),
+                    "y": round((y_min / height) * 100, 4),
+                    "width": round(((x_max - x_min) / width) * 100, 4),
+                    "height": round(((y_max - y_min) / height) * 100, 4),
+                }
+            )
+        pages.append(
+            {
+                "page_number": len(pages) + 1,
+                "width": width,
+                "height": height,
+                "words": words,
+            }
+        )
+    return pages
+
+
+def strip_xml_namespace(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def parse_float(value: str | None) -> float:
+    try:
+        return float(value or 0)
+    except ValueError:
+        return 0.0
+
+
 def chunk_markdown(markdown: str, max_words: int = 120) -> list[dict[str, Any]]:
     chunks: list[dict[str, Any]] = []
     section = "Document"
@@ -420,6 +499,25 @@ class PaperService:
                         now,
                     ),
                 )
+            text_layers = extract_pdf_text_layers(pdf_path)
+            if text_layers:
+                text_layer_path = paper_dir / "pages" / "text-layers.json"
+                text_layer_json = dumps({"pages": text_layers})
+                text_layer_path.write_text(text_layer_json, encoding="utf-8")
+                self.store.execute(
+                    """
+                    INSERT INTO artifacts
+                        (paper_id, artifact_type, storage_uri, content_hash, metadata_json, created_at)
+                    VALUES (?, 'page_text_layers', ?, ?, ?, ?)
+                    """,
+                    (
+                        paper_id,
+                        str(text_layer_path),
+                        sha256_text(text_layer_json),
+                        dumps({"source_artifact": "pdf", "extractor": "pdftotext-bbox-layout"}),
+                        now,
+                    ),
+                )
         markdown = build_markdown(meta, arxiv_id, full_text)
         markdown_path = paper_dir / "paper.md"
         markdown_path.write_text(markdown, encoding="utf-8")
@@ -574,6 +672,7 @@ class PaperService:
                     "paper_id": paper_id,
                     "page_number": page_number,
                     "image_url": f"/api/papers/{paper_id}/pages/{page_number}.png",
+                    "text_layer_url": f"/api/papers/{paper_id}/pages/{page_number}/text",
                 }
             )
         return pages
@@ -593,6 +692,74 @@ class PaperService:
             if row_page_number == page_number:
                 return Path(row["storage_uri"])
         raise KeyError("page image not found")
+
+    def paper_page_text_layer(self, paper_id: int, page_number: int) -> dict[str, Any]:
+        artifact = self._ensure_page_text_layers(paper_id)
+        if not artifact:
+            return {"paper_id": paper_id, "page_number": page_number, "width": 0, "height": 0, "words": []}
+        payload = loads(Path(artifact["storage_uri"]).read_text(encoding="utf-8"), {"pages": []})
+        for page in payload.get("pages", []):
+            if int(page.get("page_number") or 0) == page_number:
+                return {"paper_id": paper_id, **page}
+        return {"paper_id": paper_id, "page_number": page_number, "width": 0, "height": 0, "words": []}
+
+    def _ensure_page_text_layers(self, paper_id: int) -> dict[str, Any] | None:
+        artifact = self.store.query_one(
+            """
+            SELECT * FROM artifacts
+            WHERE paper_id = ? AND artifact_type = 'page_text_layers'
+            ORDER BY id
+            LIMIT 1
+            """,
+            (paper_id,),
+        )
+        if artifact:
+            return artifact
+        pdf_artifact = self.store.query_one(
+            """
+            SELECT * FROM artifacts
+            WHERE paper_id = ? AND artifact_type = 'pdf'
+            ORDER BY id
+            LIMIT 1
+            """,
+            (paper_id,),
+        )
+        if not pdf_artifact:
+            return None
+        pdf_path = Path(pdf_artifact["storage_uri"])
+        if not pdf_path.exists():
+            return None
+        text_layers = extract_pdf_text_layers(pdf_path)
+        if not text_layers:
+            return None
+        text_layer_path = pdf_path.parent / "pages" / "text-layers.json"
+        text_layer_path.parent.mkdir(parents=True, exist_ok=True)
+        text_layer_json = dumps({"pages": text_layers})
+        text_layer_path.write_text(text_layer_json, encoding="utf-8")
+        now = utcnow()
+        artifact_id = self.store.execute(
+            """
+            INSERT INTO artifacts
+                (paper_id, artifact_type, storage_uri, content_hash, metadata_json, created_at)
+            VALUES (?, 'page_text_layers', ?, ?, ?, ?)
+            """,
+            (
+                paper_id,
+                str(text_layer_path),
+                sha256_text(text_layer_json),
+                dumps({"source_artifact": "pdf", "extractor": "pdftotext-bbox-layout"}),
+                now,
+            ),
+        )
+        return {
+            "id": artifact_id,
+            "paper_id": paper_id,
+            "artifact_type": "page_text_layers",
+            "storage_uri": str(text_layer_path),
+            "content_hash": sha256_text(text_layer_json),
+            "metadata_json": dumps({"source_artifact": "pdf", "extractor": "pdftotext-bbox-layout"}),
+            "created_at": now,
+        }
 
     def chunks(self, paper_id: int) -> list[dict[str, Any]]:
         return self.store.query_all(

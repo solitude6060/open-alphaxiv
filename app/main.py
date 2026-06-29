@@ -178,6 +178,10 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return Response(content=path.read_bytes(), media_type="image/png")
 
+    @app.get("/api/papers/{paper_id}/pages/{page_number}/text")
+    async def paper_page_text(paper_id: int, page_number: int) -> dict[str, Any]:
+        return service().paper_page_text_layer(paper_id, page_number)
+
     @app.post("/api/papers/{paper_id}/bookmark")
     def bookmark(paper_id: int, payload: BookmarkUpdate) -> dict[str, Any]:
         return service().update_bookmark(paper_id, payload.bookmarked)

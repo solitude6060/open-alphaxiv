@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.services import PaperService, build_codex_paper_prompt, normalize_arxiv_id
+from app.services import PaperService, build_codex_paper_prompt, extract_pdf_text_layers, normalize_arxiv_id
 from app.store import Store
 
 
@@ -62,13 +62,59 @@ def deterministic_pdf_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
         page.write_bytes(b"png")
         return [page]
 
+    def text_layers(pdf_path: Path, max_pages: int = 12, timeout: float = 30.0) -> list[dict[str, object]]:
+        return [
+            {
+                "page_number": 1,
+                "width": 612.0,
+                "height": 792.0,
+                "words": [
+                    {"text": "Attention", "x": 10.0, "y": 12.0, "width": 8.0, "height": 1.8},
+                    {"text": "layers", "x": 18.5, "y": 12.0, "width": 5.0, "height": 1.8},
+                ],
+            }
+        ]
+
     monkeypatch.setattr("app.services.fetch_binary", pdf_bytes)
     monkeypatch.setattr("app.services.extract_pdf_text", pdf_text)
     monkeypatch.setattr("app.services.render_pdf_page_images", page_images)
+    monkeypatch.setattr("app.services.extract_pdf_text_layers", text_layers)
 
 
 def test_normalize_arxiv_id_from_url() -> None:
     assert normalize_arxiv_id("https://arxiv.org/abs/2201.08239v2") == "2201.08239"
+
+
+def test_extract_pdf_text_layers_parses_poppler_bbox(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.services.shutil.which", lambda command: "/usr/bin/pdftotext")
+
+    def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            returncode=0,
+            stdout=(
+                '<html xmlns="http://www.w3.org/1999/xhtml"><body><doc>'
+                '<page width="200" height="100">'
+                '<word xMin="20" yMin="10" xMax="60" yMax="20">Hello</word>'
+                "</page></doc></body></html>"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("app.services.subprocess.run", fake_run)
+
+    pages = extract_pdf_text_layers(tmp_path / "paper.pdf")
+
+    assert pages == [
+        {
+            "page_number": 1,
+            "width": 200.0,
+            "height": 100.0,
+            "words": [{"text": "Hello", "x": 10.0, "y": 10.0, "width": 20.0, "height": 10.0}],
+        }
+    ]
 
 
 def test_ingest_paper_creates_ready_chunks_and_graph(service: PaperService) -> None:
@@ -85,6 +131,9 @@ def test_ingest_paper_creates_ready_chunks_and_graph(service: PaperService) -> N
     pages = service.paper_pages(paper["id"])
     assert pages[0]["page_number"] == 1
     assert pages[0]["image_url"].endswith("/api/papers/1/pages/1.png")
+    assert pages[0]["text_layer_url"].endswith("/api/papers/1/pages/1/text")
+    text_layer = service.paper_page_text_layer(paper["id"], 1)
+    assert text_layer["words"][0]["text"] == "Attention"
     graph = service.literature_graph(paper["id"])
     assert len(graph["nodes"]) >= 20
     assert graph["edges"]

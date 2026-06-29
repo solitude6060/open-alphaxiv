@@ -23,6 +23,7 @@ import {
   ShieldCheck,
   Sparkles,
   Tags,
+  Type,
   X
 } from "lucide-react";
 import "./styles.css";
@@ -83,17 +84,27 @@ type ChatResult = {
   };
 };
 
-type PaperText = {
-  paper_id: number;
-  source: string;
-  text: string;
-  character_count: number;
-};
-
 type PaperPage = {
   paper_id: number;
   page_number: number;
   image_url: string;
+  text_layer_url?: string;
+};
+
+type PageTextWord = {
+  text: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+type PageTextLayer = {
+  paper_id: number;
+  page_number: number;
+  width: number;
+  height: number;
+  words: PageTextWord[];
 };
 
 type ImageSelection = {
@@ -155,8 +166,9 @@ function App() {
   const [selectedText, setSelectedText] = useState("");
   const [selectedImage, setSelectedImage] = useState<ImageSelection | null>(null);
   const [imageDrag, setImageDrag] = useState<ImageDrag | null>(null);
-  const [paperText, setPaperText] = useState<PaperText | null>(null);
   const [pages, setPages] = useState<PaperPage[]>([]);
+  const [pageTextLayers, setPageTextLayers] = useState<Record<number, PageTextLayer>>({});
+  const [selectionMode, setSelectionMode] = useState<"text" | "area">("text");
   const [chatResult, setChatResult] = useState<ChatResult | null>(null);
   const [graphView, setGraphView] = useState("related");
   const [graph, setGraph] = useState<{ nodes: GraphNode[]; edges: GraphEdge[] } | null>(null);
@@ -259,16 +271,31 @@ function App() {
   }
 
   async function loadPaperData(paperId: number, view: string) {
-    const [textData, pageRows, graphData] = await Promise.all([
-      request<PaperText>(`/api/papers/${paperId}/fulltext`),
+    setPageTextLayers({});
+    const [pageRows, graphData] = await Promise.all([
       request<PaperPage[]>(`/api/papers/${paperId}/pages`),
       request<{ nodes: GraphNode[]; edges: GraphEdge[] }>(
         `/api/papers/${paperId}/literature-graph?view=${view}`
       )
     ]);
-    setPaperText(textData);
     setPages(pageRows);
     setGraph(graphData);
+    const layerEntries = await Promise.all(
+      pageRows.map(async (page) => {
+        try {
+          const layer = await request<PageTextLayer>(
+            page.text_layer_url || `/api/papers/${paperId}/pages/${page.page_number}/text`
+          );
+          return [page.page_number, layer] as const;
+        } catch {
+          return [
+            page.page_number,
+            { paper_id: paperId, page_number: page.page_number, width: 0, height: 0, words: [] }
+          ] as const;
+        }
+      })
+    );
+    setPageTextLayers(Object.fromEntries(layerEntries));
   }
 
   async function toggleBookmark() {
@@ -363,10 +390,6 @@ function App() {
   }
 
   const graphNodes = graph?.nodes.slice(0, 8) || [];
-  const paperParagraphs = useMemo(
-    () => (paperText?.text || selectedPaper?.abstract || "").split(/\n{2,}/).filter(Boolean),
-    [paperText?.text, selectedPaper?.abstract]
-  );
 
   return (
     <main className="reader-shell">
@@ -432,54 +455,73 @@ function App() {
       {selectedPaper ? (
         <section className="reader-layout">
           <article className="paper-reader" onMouseUp={captureSelection}>
-            <div className="paper-title-row">
+            <div className="paper-toolbar">
               <div>
-                <span className="paper-kicker">arXiv:{selectedPaper.arxiv_id}</span>
-                <h1>{selectedPaper.title}</h1>
-                <p className="authors">{selectedPaper.authors.join(", ")}</p>
+                <strong>{selectedPaper.title}</strong>
+                <span>arXiv:{selectedPaper.arxiv_id}</span>
+              </div>
+              <div className="paper-toolbar-meta">
+                {pages.length > 0 ? <span>{pages.length} pages</span> : null}
+                <div className="selection-mode-switch" aria-label="PDF selection mode">
+                  <button
+                    className={selectionMode === "text" ? "active" : ""}
+                    onClick={() => setSelectionMode("text")}
+                    type="button"
+                  >
+                    <Type size={14} /> Text
+                  </button>
+                  <button
+                    className={selectionMode === "area" ? "active" : ""}
+                    onClick={() => setSelectionMode("area")}
+                    type="button"
+                  >
+                    <Crop size={14} /> Area
+                  </button>
+                </div>
               </div>
               <button className="icon-button" onClick={toggleBookmark} aria-label="Bookmark paper">
                 <Bookmark size={18} fill={selectedPaper.bookmarked ? "currentColor" : "none"} />
               </button>
             </div>
 
-            <section className="reader-abstract">
-              <h2>Abstract</h2>
-              <p>{selectedPaper.abstract}</p>
-            </section>
-
-            <section className="reader-fulltext">
-              <div className="section-title-row">
-                <h2>Full text</h2>
-                <span>{paperText?.source || "abstract"}</span>
-              </div>
-              <div className="paper-text-body">
-                {paperParagraphs.map((paragraph, index) => (
-                  <p key={`${index}-${paragraph.slice(0, 16)}`}>{paragraph}</p>
-                ))}
-              </div>
-            </section>
-
             {pages.length > 0 ? (
-              <section className="reader-pages" aria-label="Paper page images">
-                <div className="section-title-row">
-                  <h2>Pages</h2>
-                  <span>{pages.length} images</span>
-                </div>
-                <div className="page-gallery">
+              <section className="pdf-reader-stage" aria-label="Paper PDF">
+                <div className="pdf-page-list">
                   {pages.map((page) => {
                     const box = imageSelectionBox(page.page_number);
+                    const textLayer = pageTextLayers[page.page_number];
                     return (
-                      <article className="paper-page" key={page.page_number}>
+                      <article className="pdf-page-card" key={page.page_number}>
                         <div className="page-label">Page {page.page_number}</div>
                         <div
-                          className="page-frame"
-                          onMouseDown={(event) => beginImageSelection(event, page.page_number)}
-                          onMouseMove={updateImageSelection}
-                          onMouseUp={finishImageSelection}
-                          onMouseLeave={finishImageSelection}
+                          className={`page-frame ${selectionMode === "area" ? "area-mode" : "text-mode"}`}
+                          onMouseDown={
+                            selectionMode === "area"
+                              ? (event) => beginImageSelection(event, page.page_number)
+                              : undefined
+                          }
+                          onMouseMove={selectionMode === "area" ? updateImageSelection : undefined}
+                          onMouseUp={selectionMode === "area" ? finishImageSelection : undefined}
+                          onMouseLeave={selectionMode === "area" ? finishImageSelection : undefined}
                         >
                           <img src={assetUrl(page.image_url)} alt={`Paper page ${page.page_number}`} />
+                          <div className="pdf-text-layer" aria-hidden="true">
+                            {(textLayer?.words || []).map((word, index) => (
+                              <span
+                                className="pdf-word"
+                                key={`${page.page_number}-${index}`}
+                                style={{
+                                  left: `${word.x}%`,
+                                  top: `${word.y}%`,
+                                  width: `${word.width}%`,
+                                  height: `${word.height}%`,
+                                  fontSize: `${Math.max(6, word.height * 7)}px`
+                                }}
+                              >
+                                {word.text}{" "}
+                              </span>
+                            ))}
+                          </div>
                           {box ? (
                             <div
                               className="image-selection"
@@ -497,7 +539,13 @@ function App() {
                   })}
                 </div>
               </section>
-            ) : null}
+            ) : (
+              <section className="pdf-empty-state">
+                <BookOpen size={24} />
+                <h2>PDF pages unavailable</h2>
+                <p>This paper was imported before page rendering was available. Re-import it to show selectable PDF pages.</p>
+              </section>
+            )}
           </article>
 
           <aside className="tool-panel">
