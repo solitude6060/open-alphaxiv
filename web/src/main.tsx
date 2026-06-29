@@ -23,11 +23,30 @@ import {
   ShieldCheck,
   Sparkles,
   Tags,
+  Type,
   X
 } from "lucide-react";
 import "./styles.css";
 
 const API_URL = import.meta.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const CODEX_SYSTEM_PROMPT_STORAGE_KEY = "open-alphaxiv.codexSystemPrompt";
+const CODEX_PROMPT_PRESETS = [
+  {
+    label: "Markdown zh-TW",
+    value:
+      "Answer in Traditional Chinese (Taiwan). Use Markdown with short headings and bullet lists when useful. Avoid Simplified Chinese. Keep technical terms precise and define uncommon terms briefly."
+  },
+  {
+    label: "Structured JSON",
+    value:
+      'Return valid JSON only with this shape: {"summary": string, "evidence": string[], "limitations": string[]}. Do not wrap the JSON in Markdown fences.'
+  },
+  {
+    label: "Concise English",
+    value:
+      "Answer in English. Use concise Markdown bullets. Separate claims from evidence and note missing information explicitly."
+  }
+];
 
 type Paper = {
   id: number;
@@ -71,6 +90,9 @@ type GraphEdge = {
 };
 
 type ChatResult = {
+  session_id: number;
+  message_id: number;
+  user_message_id: number;
   answer: string;
   citations: Array<{ chunk_id: number; section_path: string; score: number; text: string }>;
   retrieval: {
@@ -78,22 +100,63 @@ type ChatResult = {
     model: string;
     answer_mode: "mock" | "codex";
     context_strategy?: string;
+    context_scope?: "selection" | "whole_paper";
     paper_context_chars?: number;
     selected_image?: ImageSelection | null;
   };
 };
 
-type PaperText = {
+type ChatMessage = {
+  id: number;
+  session_id: number;
+  role: "user" | "assistant";
+  content: string;
+  metadata: {
+    provider?: string;
+    model?: string;
+    answer_mode?: "mock" | "codex";
+    context_strategy?: string;
+    context_scope?: "selection" | "whole_paper";
+  };
+  created_at: string;
+};
+
+type ChatSession = {
+  id: number;
   paper_id: number;
-  source: string;
-  text: string;
-  character_count: number;
+  title: string;
+  created_at: string;
+  latest_message_at?: string;
+  message_count?: number;
+  messages?: ChatMessage[];
 };
 
 type PaperPage = {
   paper_id: number;
   page_number: number;
   image_url: string;
+  text_layer_url?: string;
+};
+
+type PageTextWord = {
+  text: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+type PageTextLayer = {
+  paper_id: number;
+  page_number: number;
+  width: number;
+  height: number;
+  words: PageTextWord[];
+};
+
+type PageTextLayersPayload = {
+  paper_id: number;
+  pages: PageTextLayer[];
 };
 
 type ImageSelection = {
@@ -152,12 +215,18 @@ function App() {
   const [source, setSource] = useState("https://arxiv.org/abs/2201.08239");
   const [query, setQuery] = useState("What is the core contribution?");
   const [answerMode, setAnswerMode] = useState<"mock" | "codex">("mock");
+  const [codexSystemPrompt, setCodexSystemPrompt] = useState(() => {
+    return window.localStorage.getItem(CODEX_SYSTEM_PROMPT_STORAGE_KEY) || "";
+  });
   const [selectedText, setSelectedText] = useState("");
   const [selectedImage, setSelectedImage] = useState<ImageSelection | null>(null);
   const [imageDrag, setImageDrag] = useState<ImageDrag | null>(null);
-  const [paperText, setPaperText] = useState<PaperText | null>(null);
   const [pages, setPages] = useState<PaperPage[]>([]);
-  const [chatResult, setChatResult] = useState<ChatResult | null>(null);
+  const [pageTextLayers, setPageTextLayers] = useState<Record<number, PageTextLayer>>({});
+  const [selectionMode, setSelectionMode] = useState<"text" | "area">("text");
+  const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<number | null>(null);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [graphView, setGraphView] = useState("related");
   const [graph, setGraph] = useState<{ nodes: GraphNode[]; edges: GraphEdge[] } | null>(null);
   const [activeTool, setActiveTool] = useState<"assistant" | "notes" | "similar" | "codex">("assistant");
@@ -206,8 +275,16 @@ function App() {
   useEffect(() => {
     setSelectedText("");
     setSelectedImage(null);
-    setChatResult(null);
+    setActiveSessionId(null);
+    setChatMessages([]);
+    if (selectedPaper) {
+      loadChatSessions(selectedPaper.id).catch((err) => setError(String(err.message || err)));
+    }
   }, [selectedPaper?.id]);
+
+  useEffect(() => {
+    window.localStorage.setItem(CODEX_SYSTEM_PROMPT_STORAGE_KEY, codexSystemPrompt);
+  }, [codexSystemPrompt]);
 
   async function createMockProvider() {
     setError("");
@@ -242,33 +319,88 @@ function App() {
 
   async function askPaper() {
     if (!selectedPaper) return;
+    const question = query.trim();
+    if (!question) return;
     setError("");
     setStatus(answerMode === "codex" ? "Asking Codex with paper context" : "Asking local mock model");
     const result = await request<ChatResult>("/api/chat/messages", {
       method: "POST",
       body: JSON.stringify({
         paper_id: selectedPaper.id,
-        query,
+        query: question,
+        session_id: activeSessionId,
         selected_text: selectedText,
         selected_image: selectedImage,
+        system_prompt: answerMode === "codex" ? codexSystemPrompt : "",
         answer_mode: answerMode
       })
     });
-    setChatResult(result);
+    setActiveSessionId(result.session_id);
+    await Promise.all([
+      loadChatSession(result.session_id),
+      refreshChatSessions(selectedPaper.id)
+    ]);
+    setQuery("");
     setStatus("Answer generated");
   }
 
+  async function refreshChatSessions(paperId: number) {
+    const sessions = await request<ChatSession[]>(`/api/papers/${paperId}/chat/sessions`);
+    setChatSessions(sessions);
+    return sessions;
+  }
+
+  async function loadChatSessions(paperId: number) {
+    const sessions = await refreshChatSessions(paperId);
+    const nextSessionId = sessions[0]?.id || null;
+    setActiveSessionId(nextSessionId);
+    if (nextSessionId) {
+      await loadChatSession(nextSessionId);
+    } else {
+      setChatMessages([]);
+    }
+  }
+
+  async function loadChatSession(sessionId: number) {
+    const session = await request<ChatSession>(`/api/chat/sessions/${sessionId}`);
+    setActiveSessionId(session.id);
+    setChatMessages(session.messages || []);
+  }
+
+  async function startChatSession() {
+    if (!selectedPaper) return;
+    setError("");
+    const session = await request<ChatSession>("/api/chat/sessions", {
+      method: "POST",
+      body: JSON.stringify({ paper_id: selectedPaper.id, title: "Paper chat" })
+    });
+    setChatSessions((sessions) => [session, ...sessions]);
+    setActiveSessionId(session.id);
+    setChatMessages([]);
+  }
+
   async function loadPaperData(paperId: number, view: string) {
-    const [textData, pageRows, graphData] = await Promise.all([
-      request<PaperText>(`/api/papers/${paperId}/fulltext`),
+    setPageTextLayers({});
+    const [pageRows, graphData] = await Promise.all([
       request<PaperPage[]>(`/api/papers/${paperId}/pages`),
       request<{ nodes: GraphNode[]; edges: GraphEdge[] }>(
         `/api/papers/${paperId}/literature-graph?view=${view}`
       )
     ]);
-    setPaperText(textData);
     setPages(pageRows);
     setGraph(graphData);
+    if (pageRows.length === 0) {
+      setPageTextLayers({});
+      return;
+    }
+    try {
+      const layerPayload = await request<PageTextLayersPayload>(`/api/papers/${paperId}/pages/text`);
+      setPageTextLayers(
+        Object.fromEntries(layerPayload.pages.map((layer) => [layer.page_number, layer] as const))
+      );
+    } catch {
+      setPageTextLayers({});
+    }
   }
 
   async function toggleBookmark() {
@@ -363,10 +495,6 @@ function App() {
   }
 
   const graphNodes = graph?.nodes.slice(0, 8) || [];
-  const paperParagraphs = useMemo(
-    () => (paperText?.text || selectedPaper?.abstract || "").split(/\n{2,}/).filter(Boolean),
-    [paperText?.text, selectedPaper?.abstract]
-  );
 
   return (
     <main className="reader-shell">
@@ -432,54 +560,73 @@ function App() {
       {selectedPaper ? (
         <section className="reader-layout">
           <article className="paper-reader" onMouseUp={captureSelection}>
-            <div className="paper-title-row">
+            <div className="paper-toolbar">
               <div>
-                <span className="paper-kicker">arXiv:{selectedPaper.arxiv_id}</span>
-                <h1>{selectedPaper.title}</h1>
-                <p className="authors">{selectedPaper.authors.join(", ")}</p>
+                <strong>{selectedPaper.title}</strong>
+                <span>arXiv:{selectedPaper.arxiv_id}</span>
+              </div>
+              <div className="paper-toolbar-meta">
+                {pages.length > 0 ? <span>{pages.length} pages</span> : null}
+                <div className="selection-mode-switch" aria-label="PDF selection mode">
+                  <button
+                    className={selectionMode === "text" ? "active" : ""}
+                    onClick={() => setSelectionMode("text")}
+                    type="button"
+                  >
+                    <Type size={14} /> Text
+                  </button>
+                  <button
+                    className={selectionMode === "area" ? "active" : ""}
+                    onClick={() => setSelectionMode("area")}
+                    type="button"
+                  >
+                    <Crop size={14} /> Area
+                  </button>
+                </div>
               </div>
               <button className="icon-button" onClick={toggleBookmark} aria-label="Bookmark paper">
                 <Bookmark size={18} fill={selectedPaper.bookmarked ? "currentColor" : "none"} />
               </button>
             </div>
 
-            <section className="reader-abstract">
-              <h2>Abstract</h2>
-              <p>{selectedPaper.abstract}</p>
-            </section>
-
-            <section className="reader-fulltext">
-              <div className="section-title-row">
-                <h2>Full text</h2>
-                <span>{paperText?.source || "abstract"}</span>
-              </div>
-              <div className="paper-text-body">
-                {paperParagraphs.map((paragraph, index) => (
-                  <p key={`${index}-${paragraph.slice(0, 16)}`}>{paragraph}</p>
-                ))}
-              </div>
-            </section>
-
             {pages.length > 0 ? (
-              <section className="reader-pages" aria-label="Paper page images">
-                <div className="section-title-row">
-                  <h2>Pages</h2>
-                  <span>{pages.length} images</span>
-                </div>
-                <div className="page-gallery">
+              <section className="pdf-reader-stage" aria-label="Paper PDF">
+                <div className="pdf-page-list">
                   {pages.map((page) => {
                     const box = imageSelectionBox(page.page_number);
+                    const textLayer = pageTextLayers[page.page_number];
                     return (
-                      <article className="paper-page" key={page.page_number}>
+                      <article className="pdf-page-card" key={page.page_number}>
                         <div className="page-label">Page {page.page_number}</div>
                         <div
-                          className="page-frame"
-                          onMouseDown={(event) => beginImageSelection(event, page.page_number)}
-                          onMouseMove={updateImageSelection}
-                          onMouseUp={finishImageSelection}
-                          onMouseLeave={finishImageSelection}
+                          className={`page-frame ${selectionMode === "area" ? "area-mode" : "text-mode"}`}
+                          onMouseDown={
+                            selectionMode === "area"
+                              ? (event) => beginImageSelection(event, page.page_number)
+                              : undefined
+                          }
+                          onMouseMove={selectionMode === "area" ? updateImageSelection : undefined}
+                          onMouseUp={selectionMode === "area" ? finishImageSelection : undefined}
+                          onMouseLeave={selectionMode === "area" ? finishImageSelection : undefined}
                         >
                           <img src={assetUrl(page.image_url)} alt={`Paper page ${page.page_number}`} />
+                          <div className="pdf-text-layer" aria-hidden="true">
+                            {(textLayer?.words || []).map((word, index) => (
+                              <span
+                                className="pdf-word"
+                                key={`${page.page_number}-${index}`}
+                                style={{
+                                  left: `${word.x}%`,
+                                  top: `${word.y}%`,
+                                  width: `${word.width}%`,
+                                  height: `${word.height}%`,
+                                  fontSize: `${Math.max(6, word.height * 7)}px`
+                                }}
+                              >
+                                {word.text}{" "}
+                              </span>
+                            ))}
+                          </div>
                           {box ? (
                             <div
                               className="image-selection"
@@ -497,7 +644,20 @@ function App() {
                   })}
                 </div>
               </section>
-            ) : null}
+            ) : (
+              <section className="pdf-empty-state">
+                <BookOpen size={24} />
+                <h2>PDF pages unavailable</h2>
+                <p>
+                  PDF page rendering is unavailable for this paper. The abstract remains available for reading and
+                  question answering.
+                </p>
+                <div className="pdf-fallback-abstract">
+                  <strong>Abstract</strong>
+                  <p>{selectedPaper.abstract}</p>
+                </div>
+              </section>
+            )}
           </article>
 
           <aside className="tool-panel">
@@ -545,6 +705,34 @@ function App() {
                     Enable the local Codex agent in the backend before using Codex for paper chat.
                   </p>
                 ) : null}
+                <div className="conversation-controls">
+                  <select
+                    value={activeSessionId || ""}
+                    onChange={(event) => {
+                      const sessionId = Number(event.target.value);
+                      if (sessionId) {
+                        loadChatSession(sessionId).catch((err) => setError(String(err.message || err)));
+                      }
+                    }}
+                    aria-label="Conversation"
+                  >
+                    {chatSessions.length === 0 ? <option value="">New conversation</option> : null}
+                    {chatSessions.map((session) => (
+                      <option key={session.id} value={session.id}>
+                        {session.title} · {session.message_count || 0} messages
+                      </option>
+                    ))}
+                  </select>
+                  <button type="button" onClick={() => startChatSession().catch((err) => setError(String(err.message || err)))} title="New conversation">
+                    <Plus size={15} />
+                  </button>
+                </div>
+                {answerMode === "codex" && codexSystemPrompt.trim() ? (
+                  <div className="prompt-applied">
+                    <KeyRound size={15} />
+                    <span>Custom Codex prompt applied</span>
+                  </div>
+                ) : null}
                 {selectedText ? (
                   <div className="selected-quote">
                     <Quote size={15} />
@@ -563,19 +751,44 @@ function App() {
                     </button>
                   </div>
                 ) : null}
-                <textarea value={query} onChange={(event) => setQuery(event.target.value)} />
+                {!selectedText && !selectedImage ? (
+                  <div className="whole-paper-context">
+                    <BookOpen size={15} />
+                    <span>Whole paper context will be sent when you ask.</span>
+                  </div>
+                ) : null}
+                <div className="conversation-thread" aria-label="Paper conversation">
+                  {chatMessages.length === 0 ? (
+                    <div className="conversation-empty">Ask a question to start a paper conversation.</div>
+                  ) : (
+                    chatMessages.map((message) => (
+                      <article className={`chat-message ${message.role}`} key={message.id}>
+                        <div className="chat-message-meta">
+                          <strong>{message.role === "assistant" ? "Assistant" : "You"}</strong>
+                          {message.metadata?.provider ? (
+                            <span>
+                              {message.metadata.provider} / {message.metadata.model}
+                              {message.metadata.context_scope === "whole_paper" ? " / whole paper" : ""}
+                            </span>
+                          ) : null}
+                        </div>
+                        {message.role === "assistant" ? (
+                          <MarkdownAnswer markdown={message.content} />
+                        ) : (
+                          <p>{message.content}</p>
+                        )}
+                      </article>
+                    ))
+                  )}
+                </div>
+                <textarea
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder="Ask a follow-up about this paper..."
+                />
                 <button className="primary wide" onClick={askPaper}>
                   <MessageSquare size={16} /> Ask paper
                 </button>
-                {chatResult ? (
-                  <div className="answer">
-                    <div className="answer-meta">
-                      {chatResult.retrieval.provider} / {chatResult.retrieval.model}
-                      {chatResult.retrieval.context_strategy === "full_text" ? " / full text" : ""}
-                    </div>
-                    <p>{chatResult.answer}</p>
-                  </div>
-                ) : null}
               </section>
             ) : null}
 
@@ -648,6 +861,29 @@ function App() {
                 </div>
                 <p className="codex-path">{codexStatus?.codex_cli_path}</p>
                 <p className="codex-boundary">{codexStatus?.integration_boundary}</p>
+                <label className="field-label">
+                  System prompt
+                  <textarea
+                    className="codex-system-prompt"
+                    value={codexSystemPrompt}
+                    onChange={(event) => setCodexSystemPrompt(event.target.value)}
+                    placeholder="Example: Answer in Traditional Chinese. Use Markdown headings, bullets, and tables where useful."
+                  />
+                </label>
+                <div className="prompt-actions" aria-label="Codex prompt presets">
+                  {CODEX_PROMPT_PRESETS.map((preset) => (
+                    <button
+                      key={preset.label}
+                      type="button"
+                      onClick={() => setCodexSystemPrompt(preset.value)}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                  <button type="button" onClick={() => setCodexSystemPrompt("")}>
+                    Clear
+                  </button>
+                </div>
                 {!codexStatus?.codex_chat_available ? (
                   <div className="setup-code">
                     <strong>Docker setup</strong>
@@ -681,6 +917,204 @@ function StatusLine({ label, value }: { label: string; value?: boolean }) {
       <strong>{value ? "yes" : "no"}</strong>
     </div>
   );
+}
+
+function MarkdownAnswer({ markdown }: { markdown: string }) {
+  return <div className="markdown-answer">{renderMarkdownBlocks(markdown)}</div>;
+}
+
+function renderMarkdownBlocks(markdown: string) {
+  const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+  const blocks: React.ReactNode[] = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+
+    if (line.trim().startsWith("```")) {
+      const language = line.trim().slice(3).trim();
+      const code: string[] = [];
+      index += 1;
+      while (index < lines.length && !lines[index].trim().startsWith("```")) {
+        code.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) index += 1;
+      blocks.push(
+        <pre key={`code-${index}`} className="markdown-code">
+          {language ? <span>{language}</span> : null}
+          <code>{code.join("\n")}</code>
+        </pre>
+      );
+      continue;
+    }
+
+    const heading = /^(#{1,3})\s+(.+)$/.exec(line);
+    if (heading) {
+      const level = heading[1].length;
+      const content = renderInlineMarkdown(heading[2], `heading-${index}`);
+      blocks.push(
+        level === 1 ? (
+          <h3 key={`heading-${index}`}>{content}</h3>
+        ) : level === 2 ? (
+          <h4 key={`heading-${index}`}>{content}</h4>
+        ) : (
+          <h5 key={`heading-${index}`}>{content}</h5>
+        )
+      );
+      index += 1;
+      continue;
+    }
+
+    if (isMarkdownTable(lines, index)) {
+      const tableLines = [lines[index]];
+      index += 2;
+      while (index < lines.length && lines[index].includes("|") && lines[index].trim()) {
+        tableLines.push(lines[index]);
+        index += 1;
+      }
+      blocks.push(renderMarkdownTable(tableLines, `table-${index}`));
+      continue;
+    }
+
+    const listMatch = /^(\s*)([-*]|\d+\.)\s+(.+)$/.exec(line);
+    if (listMatch) {
+      const ordered = /^\d+\.$/.test(listMatch[2]);
+      const items: string[] = [];
+      while (index < lines.length) {
+        const item = /^(\s*)([-*]|\d+\.)\s+(.+)$/.exec(lines[index]);
+        if (!item || /^\d+\.$/.test(item[2]) !== ordered) break;
+        items.push(item[3]);
+        index += 1;
+      }
+      const ListTag = ordered ? "ol" : "ul";
+      blocks.push(
+        <ListTag key={`list-${index}`}>
+          {items.map((item, itemIndex) => (
+            <li key={`${index}-${itemIndex}`}>{renderInlineMarkdown(item, `list-${index}-${itemIndex}`)}</li>
+          ))}
+        </ListTag>
+      );
+      continue;
+    }
+
+    if (line.trim().startsWith(">")) {
+      const quote: string[] = [];
+      while (index < lines.length && lines[index].trim().startsWith(">")) {
+        quote.push(lines[index].trim().replace(/^>\s?/, ""));
+        index += 1;
+      }
+      blocks.push(
+        <blockquote key={`quote-${index}`}>
+          {renderInlineMarkdown(quote.join(" "), `quote-${index}`)}
+        </blockquote>
+      );
+      continue;
+    }
+
+    const paragraph: string[] = [line.trim()];
+    index += 1;
+    while (index < lines.length && lines[index].trim() && !isMarkdownBlockStart(lines, index)) {
+      paragraph.push(lines[index].trim());
+      index += 1;
+    }
+    blocks.push(
+      <p key={`paragraph-${index}`}>{renderInlineMarkdown(paragraph.join(" "), `paragraph-${index}`)}</p>
+    );
+  }
+
+  return blocks;
+}
+
+function isMarkdownBlockStart(lines: string[], index: number) {
+  const line = lines[index];
+  return (
+    line.trim().startsWith("```") ||
+    /^(#{1,3})\s+/.test(line) ||
+    /^(\s*)([-*]|\d+\.)\s+/.test(line) ||
+    line.trim().startsWith(">") ||
+    isMarkdownTable(lines, index)
+  );
+}
+
+function isMarkdownTable(lines: string[], index: number) {
+  if (index + 1 >= lines.length) return false;
+  return (
+    lines[index].includes("|") &&
+    /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(lines[index + 1])
+  );
+}
+
+function renderMarkdownTable(lines: string[], key: string) {
+  const rows = lines.map(splitMarkdownTableRow);
+  const [header, ...body] = rows;
+  return (
+    <div className="markdown-table-wrap" key={key}>
+      <table>
+        <thead>
+          <tr>
+            {header.map((cell, index) => (
+              <th key={`${key}-head-${index}`}>{renderInlineMarkdown(cell, `${key}-head-${index}`)}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {body.map((row, rowIndex) => (
+            <tr key={`${key}-row-${rowIndex}`}>
+              {row.map((cell, cellIndex) => (
+                <td key={`${key}-cell-${rowIndex}-${cellIndex}`}>
+                  {renderInlineMarkdown(cell, `${key}-cell-${rowIndex}-${cellIndex}`)}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function splitMarkdownTableRow(line: string) {
+  return line
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
+}
+
+function renderInlineMarkdown(text: string, keyPrefix: string) {
+  const nodes: React.ReactNode[] = [];
+  const pattern = /(\[([^\]]+)\]\((https?:\/\/[^\s)]+|mailto:[^\s)]+)\)|`([^`]+)`|\*\*([^*]+)\*\*)/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      nodes.push(text.slice(lastIndex, match.index));
+    }
+    if (match[2] && match[3]) {
+      nodes.push(
+        <a key={`${keyPrefix}-${match.index}`} href={match[3]} target="_blank" rel="noreferrer">
+          {match[2]}
+        </a>
+      );
+    } else if (match[4]) {
+      nodes.push(<code key={`${keyPrefix}-${match.index}`}>{match[4]}</code>);
+    } else if (match[5]) {
+      nodes.push(<strong key={`${keyPrefix}-${match.index}`}>{match[5]}</strong>);
+    }
+    lastIndex = pattern.lastIndex;
+  }
+
+  if (lastIndex < text.length) {
+    nodes.push(text.slice(lastIndex));
+  }
+  return nodes;
 }
 
 function assetUrl(path: string) {

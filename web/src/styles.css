@@ -271,6 +271,7 @@ a {
 .paper-title-row,
 .status-line,
 .auth-modes,
+.prompt-applied,
 .selected-image-card {
   display: flex;
   align-items: center;
@@ -289,6 +290,7 @@ a {
 .tool-heading svg,
 .tool-tabs svg,
 .selected-quote svg,
+.prompt-applied svg,
 .selected-image-card svg,
 .icon-button svg,
 .status-line svg {
@@ -420,8 +422,82 @@ a {
   overflow: auto;
   border: 1px solid #dbe3e6;
   border-radius: 8px;
-  background: #fff;
-  padding: 32px clamp(22px, 5vw, 76px);
+  background: #e8eef1;
+  padding: 0;
+}
+
+.paper-toolbar {
+  min-height: 58px;
+  position: sticky;
+  top: 0;
+  z-index: 8;
+  border-bottom: 1px solid #d0dadd;
+  padding: 9px 12px 9px 16px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 40px;
+  align-items: center;
+  gap: 12px;
+  background: rgba(255, 255, 255, 0.96);
+  backdrop-filter: blur(10px);
+}
+
+.paper-toolbar > div:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.paper-toolbar strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #172026;
+  font-size: 14px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.paper-toolbar span {
+  color: #526870;
+  font-size: 12px;
+}
+
+.paper-toolbar-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  white-space: nowrap;
+}
+
+.selection-mode-switch {
+  min-height: 34px;
+  border: 1px solid #d6e0e3;
+  border-radius: 7px;
+  padding: 3px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px;
+  background: #f8fbfc;
+}
+
+.selection-mode-switch button {
+  border: 0;
+  border-radius: 5px;
+  padding: 5px 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  background: transparent;
+  color: #526870;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.selection-mode-switch button.active {
+  background: #263a41;
+  color: #fff;
 }
 
 .paper-title-row {
@@ -536,14 +612,30 @@ a {
   font-weight: 800;
 }
 
+.pdf-reader-stage {
+  min-height: calc(100% - 58px);
+  padding: 22px 18px 34px;
+}
+
+.pdf-page-list {
+  width: min(860px, 100%);
+  margin: 0 auto;
+  display: grid;
+  gap: 18px;
+}
+
+.pdf-page-card {
+  display: grid;
+  gap: 8px;
+}
+
 .page-frame {
   position: relative;
   overflow: hidden;
-  border: 1px solid #dbe3e6;
-  border-radius: 7px;
-  background: #f8fbfc;
-  cursor: crosshair;
-  user-select: none;
+  border: 1px solid #c8d3d7;
+  border-radius: 2px;
+  background: #fff;
+  box-shadow: 0 8px 26px rgba(16, 32, 38, 0.18);
 }
 
 .page-frame img {
@@ -553,12 +645,101 @@ a {
   pointer-events: none;
 }
 
+.page-frame.text-mode {
+  cursor: text;
+  user-select: text;
+}
+
+.page-frame.area-mode {
+  cursor: crosshair;
+  user-select: none;
+}
+
+.pdf-text-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+}
+
+.page-frame.area-mode .pdf-text-layer {
+  pointer-events: none;
+  user-select: none;
+}
+
+.page-frame.text-mode .pdf-text-layer {
+  pointer-events: auto;
+  user-select: text;
+}
+
+.pdf-word {
+  position: absolute;
+  overflow: hidden;
+  color: transparent;
+  line-height: 1;
+  white-space: pre;
+  user-select: text;
+}
+
+.pdf-word::selection {
+  color: transparent;
+  background: rgba(252, 214, 99, 0.5);
+}
+
 .image-selection {
   position: absolute;
+  z-index: 3;
   border: 2px solid #c6563f;
   background: rgba(198, 86, 63, 0.14);
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.72) inset;
   pointer-events: none;
+}
+
+.pdf-empty-state {
+  margin: 28px;
+  min-height: 320px;
+  border: 1px dashed #b8c6cb;
+  border-radius: 8px;
+  padding: 24px;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 10px;
+  background: #f8fbfc;
+  color: #526870;
+  text-align: center;
+}
+
+.pdf-empty-state h2,
+.pdf-empty-state p {
+  margin: 0;
+}
+
+.pdf-empty-state p {
+  max-width: 420px;
+  line-height: 1.5;
+}
+
+.pdf-fallback-abstract {
+  width: min(620px, 100%);
+  margin-top: 10px;
+  border: 1px solid #dbe3e6;
+  border-radius: 8px;
+  padding: 14px;
+  display: grid;
+  gap: 8px;
+  background: #fff;
+  color: #263a41;
+  text-align: left;
+}
+
+.pdf-fallback-abstract strong {
+  font-size: 13px;
+}
+
+.pdf-fallback-abstract p {
+  max-width: none;
+  color: #405157;
+  font-size: 14px;
 }
 
 .tool-panel {
@@ -642,6 +823,78 @@ textarea {
   resize: vertical;
 }
 
+.codex-system-prompt {
+  min-height: 150px;
+  line-height: 1.45;
+}
+
+.prompt-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.prompt-actions button {
+  min-height: 32px;
+  border: 1px solid #d6e0e3;
+  border-radius: 6px;
+  padding: 7px 9px;
+  background: #f8fbfc;
+  color: #263a41;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.prompt-applied {
+  min-height: 38px;
+  gap: 8px;
+  border: 1px solid #d6e0e3;
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: #f8fbfc;
+  color: #405157;
+  font-size: 13px;
+}
+
+.conversation-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 36px;
+  gap: 8px;
+}
+
+.conversation-controls select {
+  min-width: 0;
+  border: 1px solid #d6e0e3;
+  border-radius: 6px;
+  padding: 8px 9px;
+  background: #fff;
+  color: #263a41;
+  font-size: 13px;
+}
+
+.conversation-controls button {
+  border: 1px solid #d6e0e3;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  background: #f8fbfc;
+  color: #2d7d6f;
+}
+
+.whole-paper-context {
+  min-height: 38px;
+  border: 1px solid #d6e0e3;
+  border-radius: 8px;
+  padding: 9px 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #f8fbfc;
+  color: #405157;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
 .selected-quote {
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr) auto;
@@ -714,6 +967,62 @@ textarea {
   font-weight: 800;
 }
 
+.conversation-thread {
+  max-height: 440px;
+  overflow: auto;
+  display: grid;
+  gap: 10px;
+}
+
+.conversation-empty {
+  border: 1px dashed #cad5d9;
+  border-radius: 8px;
+  padding: 13px;
+  background: #f8fbfc;
+  color: #62777e;
+  font-size: 13px;
+}
+
+.chat-message {
+  min-width: 0;
+  display: grid;
+  gap: 7px;
+}
+
+.chat-message-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  color: #526870;
+  font-size: 12px;
+}
+
+.chat-message-meta strong {
+  color: #172026;
+}
+
+.chat-message-meta span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-message.user p {
+  margin: 0;
+  border: 1px solid #cfe9e4;
+  border-radius: 8px;
+  padding: 10px;
+  background: #f0faf8;
+  color: #20353a;
+  line-height: 1.5;
+}
+
+.chat-message.assistant .markdown-answer {
+  background: #fff;
+}
+
 .answer > p {
   margin: 0;
   border: 1px solid #e3eaed;
@@ -721,6 +1030,114 @@ textarea {
   padding: 12px;
   background: #f8fbfc;
   line-height: 1.55;
+}
+
+.markdown-answer {
+  border: 1px solid #e3eaed;
+  border-radius: 8px;
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+  background: #f8fbfc;
+  color: #263a41;
+  line-height: 1.55;
+}
+
+.markdown-answer h3,
+.markdown-answer h4,
+.markdown-answer h5,
+.markdown-answer p,
+.markdown-answer ul,
+.markdown-answer ol,
+.markdown-answer blockquote,
+.markdown-answer pre {
+  margin: 0;
+}
+
+.markdown-answer h3 {
+  font-size: 17px;
+}
+
+.markdown-answer h4 {
+  font-size: 15px;
+}
+
+.markdown-answer h5 {
+  font-size: 14px;
+}
+
+.markdown-answer ul,
+.markdown-answer ol {
+  padding-left: 20px;
+}
+
+.markdown-answer li + li {
+  margin-top: 5px;
+}
+
+.markdown-answer a {
+  color: #2d7d6f;
+  font-weight: 800;
+}
+
+.markdown-answer code {
+  border-radius: 4px;
+  padding: 2px 4px;
+  background: #e9f0f2;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+}
+
+.markdown-answer blockquote {
+  border-left: 3px solid #9ab0b7;
+  padding-left: 10px;
+  color: #405157;
+}
+
+.markdown-code {
+  overflow: auto;
+  border-radius: 6px;
+  padding: 10px;
+  display: grid;
+  gap: 6px;
+  background: #102026;
+  color: #dff8f3;
+}
+
+.markdown-code span {
+  color: #8db8b1;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.markdown-code code {
+  padding: 0;
+  background: transparent;
+  color: inherit;
+}
+
+.markdown-table-wrap {
+  overflow: auto;
+}
+
+.markdown-table-wrap table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.markdown-table-wrap th,
+.markdown-table-wrap td {
+  border: 1px solid #dbe3e6;
+  padding: 7px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown-table-wrap th {
+  background: #edf3f5;
+  color: #172026;
 }
 
 .field-label {

@@ -107,8 +107,8 @@ Fields:
 
 - `id`
 - `paper_id`
-- `artifact_type`: `pdf`, `pdf_text`, `page_image`, `markdown`, `summary`,
-  `notes`, `graph_snapshot`, `export`
+- `artifact_type`: `pdf`, `pdf_text`, `page_image`, `page_text_layers`,
+  `markdown`, `summary`, `notes`, `graph_snapshot`, `export`
 - `storage_uri`
 - `content_hash`
 - `metadata_json`
@@ -203,6 +203,7 @@ Message metadata must include:
 - provider
 - model
 - prompt version
+- user-configured Codex system prompt preview when supplied
 - retrieved chunk IDs
 - retrieved literature node IDs
 - token counts when available
@@ -240,7 +241,9 @@ Fields:
 - `GET /api/papers/{paper_id}/chunks`
 - `GET /api/papers/{paper_id}/fulltext`
 - `GET /api/papers/{paper_id}/pages`
+- `GET /api/papers/{paper_id}/pages/text`
 - `GET /api/papers/{paper_id}/pages/{page_number}.png`
+- `GET /api/papers/{paper_id}/pages/{page_number}/text`
 - `POST /api/papers/{paper_id}/retry`
 - `POST /api/papers/{paper_id}/bookmark`
 - `POST /api/papers/{paper_id}/tags`
@@ -248,9 +251,14 @@ Fields:
 ### Chat APIs
 
 - `POST /api/chat/sessions`
+- `GET /api/papers/{paper_id}/chat/sessions`
 - `GET /api/chat/sessions/{session_id}`
 - `POST /api/chat/sessions/{session_id}/messages`
   - Supports streaming through server-sent events when requested.
+- `POST /api/chat/messages`
+  - Backward-compatible non-streaming message endpoint. If no selected passage
+    or selected image region is supplied, Codex paper chat treats the whole
+    paper file references and extracted full text as the active context.
 - `GET /api/chat/messages/{message_id}/retrieval`
   - Returns chunks, graph paths, scores, and prompt metadata.
 
@@ -304,6 +312,8 @@ Inputs:
 - Paper ID.
 - User query.
 - Chat history.
+- Selected passage or selected image region, when supplied.
+- Whole-paper file references and extracted full text when no selection is supplied.
 - Retrieval settings.
 
 Steps:

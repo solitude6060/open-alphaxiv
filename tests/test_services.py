@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.services import PaperService, build_codex_paper_prompt, normalize_arxiv_id
+from app.services import PaperService, build_codex_paper_prompt, extract_pdf_text_layers, normalize_arxiv_id
 from app.store import Store
 
 
@@ -62,13 +62,59 @@ def deterministic_pdf_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
         page.write_bytes(b"png")
         return [page]
 
+    def text_layers(pdf_path: Path, max_pages: int = 12, timeout: float = 30.0) -> list[dict[str, object]]:
+        return [
+            {
+                "page_number": 1,
+                "width": 612.0,
+                "height": 792.0,
+                "words": [
+                    {"text": "Attention", "x": 10.0, "y": 12.0, "width": 8.0, "height": 1.8},
+                    {"text": "layers", "x": 18.5, "y": 12.0, "width": 5.0, "height": 1.8},
+                ],
+            }
+        ]
+
     monkeypatch.setattr("app.services.fetch_binary", pdf_bytes)
     monkeypatch.setattr("app.services.extract_pdf_text", pdf_text)
     monkeypatch.setattr("app.services.render_pdf_page_images", page_images)
+    monkeypatch.setattr("app.services.extract_pdf_text_layers", text_layers)
 
 
 def test_normalize_arxiv_id_from_url() -> None:
     assert normalize_arxiv_id("https://arxiv.org/abs/2201.08239v2") == "2201.08239"
+
+
+def test_extract_pdf_text_layers_parses_poppler_bbox(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.services.shutil.which", lambda command: "/usr/bin/pdftotext")
+
+    def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            returncode=0,
+            stdout=(
+                '<html xmlns="http://www.w3.org/1999/xhtml"><body><doc>'
+                '<page width="200" height="100">'
+                '<word xMin="20" yMin="10" xMax="60" yMax="20">Hello</word>'
+                "</page></doc></body></html>"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("app.services.subprocess.run", fake_run)
+
+    pages = extract_pdf_text_layers(tmp_path / "paper.pdf")
+
+    assert pages == [
+        {
+            "page_number": 1,
+            "width": 200.0,
+            "height": 100.0,
+            "words": [{"text": "Hello", "x": 10.0, "y": 10.0, "width": 20.0, "height": 10.0}],
+        }
+    ]
 
 
 def test_ingest_paper_creates_ready_chunks_and_graph(service: PaperService) -> None:
@@ -85,9 +131,43 @@ def test_ingest_paper_creates_ready_chunks_and_graph(service: PaperService) -> N
     pages = service.paper_pages(paper["id"])
     assert pages[0]["page_number"] == 1
     assert pages[0]["image_url"].endswith("/api/papers/1/pages/1.png")
+    assert pages[0]["text_layer_url"].endswith("/api/papers/1/pages/1/text")
+    text_layers = service.paper_text_layers(paper["id"])
+    assert text_layers["pages"][0]["words"][0]["text"] == "Attention"
+    text_layer = service.paper_page_text_layer(paper["id"], 1)
+    assert text_layer["words"][0]["text"] == "Attention"
     graph = service.literature_graph(paper["id"])
     assert len(graph["nodes"]) >= 20
     assert graph["edges"]
+
+
+def test_page_text_layers_lazy_generation_is_idempotent(service: PaperService) -> None:
+    paper = service.ingest_paper("https://arxiv.org/abs/2201.08239")
+    artifact = service.store.query_one(
+        "SELECT * FROM artifacts WHERE paper_id = ? AND artifact_type = 'page_text_layers'",
+        (paper["id"],),
+    )
+    assert artifact
+    Path(artifact["storage_uri"]).unlink()
+    service.store.execute("DELETE FROM artifacts WHERE id = ?", (artifact["id"],))
+
+    first = service.paper_text_layers(paper["id"])
+    second = service.paper_text_layers(paper["id"])
+    artifact_count = service.store.query_one(
+        "SELECT COUNT(*) AS count FROM artifacts WHERE paper_id = ? AND artifact_type = 'page_text_layers'",
+        (paper["id"],),
+    )["count"]
+
+    assert first["pages"][0]["words"][0]["text"] == "Attention"
+    assert second["pages"][0]["words"][0]["text"] == "Attention"
+    assert artifact_count == 1
+
+
+def test_page_text_layer_rejects_unknown_page(service: PaperService) -> None:
+    paper = service.ingest_paper("https://arxiv.org/abs/2201.08239")
+
+    with pytest.raises(KeyError, match="page image not found"):
+        service.paper_page_text_layer(paper["id"], 999)
 
 
 def test_provider_healthcheck_and_redaction(service: PaperService) -> None:
@@ -120,6 +200,20 @@ def test_chat_uses_selected_text_as_question_focus(service: PaperService) -> Non
     assert answer["citations"]
 
 
+def test_chat_session_persists_conversation_messages(service: PaperService) -> None:
+    paper = service.ingest_paper("2201.08239")
+    session = service.create_chat_session(paper["id"], "Transformer questions")
+
+    first = service.ask(paper["id"], "What is the paper about?", session_id=session["id"])
+    second = service.ask(paper["id"], "What did I ask first?", session_id=session["id"])
+    loaded = service.get_chat_session(session["id"])
+
+    assert first["session_id"] == session["id"]
+    assert second["session_id"] == session["id"]
+    assert [message["role"] for message in loaded["messages"]] == ["user", "assistant", "user", "assistant"]
+    assert loaded["messages"][0]["content"] == "What is the paper about?"
+
+
 def test_chat_can_use_codex_answer_mode(service: PaperService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paper = service.ingest_paper("2201.08239")
     captured: dict[str, object] = {}
@@ -138,6 +232,7 @@ def test_chat_can_use_codex_answer_mode(service: PaperService, tmp_path: Path, m
         "Explain the contribution",
         selected_text="selected context",
         selected_image={"page": 1, "x": 10, "y": 12, "width": 40, "height": 20},
+        system_prompt="Answer in Traditional Chinese and use Markdown bullets.",
         answer_mode="codex",
         codex_options={
             "enabled": True,
@@ -154,14 +249,63 @@ def test_chat_can_use_codex_answer_mode(service: PaperService, tmp_path: Path, m
     assert answer["retrieval"]["provider"] == "codex"
     assert answer["retrieval"]["answer_mode"] == "codex"
     assert answer["retrieval"]["context_strategy"] == "full_text"
+    assert answer["retrieval"]["system_prompt_chars"] > 0
+    assert answer["retrieval"]["system_prompt_preview"].startswith("Answer in Traditional Chinese")
     assert "Paper context:" in prompt
     assert "scaled dot product attention" in prompt
     assert "Selected image region:" in prompt
+    assert "User-configured system prompt:" in prompt
+    assert "Answer in Traditional Chinese and use Markdown bullets." in prompt
     assert "Retrieved chunks:" not in prompt
     assert command[:2] == ["/usr/local/bin/codex", "exec"]
     assert "--sandbox" in command
     assert "read-only" in command
     assert "--skip-git-repo-check" in command
+
+
+def test_codex_answer_receives_history_and_whole_paper_scope(
+    service: PaperService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paper = service.ingest_paper("2201.08239")
+    session = service.create_chat_session(paper["id"], "Follow-up")
+    service.ask(paper["id"], "What is attention?", session_id=session["id"])
+    captured: dict[str, object] = {}
+
+    def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        captured["prompt"] = command[-1]
+        return SimpleNamespace(returncode=0, stdout="Codex follow-up answer", stderr="")
+
+    monkeypatch.setattr("app.services.resolve_executable", lambda path: "/usr/local/bin/codex")
+    monkeypatch.setattr("app.services.codex_credentials_available", lambda options: True)
+    monkeypatch.setattr("app.services.subprocess.run", fake_run)
+
+    answer = service.ask(
+        paper["id"],
+        "Continue from the previous question",
+        session_id=session["id"],
+        answer_mode="codex",
+        codex_options={"enabled": True, "timeout_seconds": 5, "cwd": tmp_path},
+    )
+
+    prompt = str(captured["prompt"])
+    assert answer["retrieval"]["context_scope"] == "whole_paper"
+    assert answer["retrieval"]["conversation_message_count"] == 2
+    assert "No passage or image region is selected" in prompt
+    assert "Conversation history:" in prompt
+    assert "user: What is attention?" in prompt
+    assert "Paper file references:" in prompt
+    assert "Local PDF path:" in prompt
+
+
+def test_chat_session_rejects_different_paper(service: PaperService) -> None:
+    first = service.ingest_paper("2201.08239")
+    second = service.ingest_paper("https://arxiv.org/abs/1706.03762")
+    session = service.create_chat_session(first["id"], "First paper")
+
+    with pytest.raises(ValueError, match="does not belong"):
+        service.ask(second["id"], "Wrong paper", session_id=session["id"])
 
 
 def test_codex_answer_mode_requires_explicit_enablement(service: PaperService) -> None:
