@@ -5,6 +5,7 @@ import math
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import textwrap
@@ -42,6 +43,7 @@ STOPWORDS = {
     "our",
     "their",
 }
+MAX_UPLOAD_PDF_BYTES = 50_000_000
 PROJECT_STATUSES = {"active", "paused", "completed", "archived"}
 QUESTION_STATUSES = {"open", "investigating", "answered", "abandoned"}
 NOTE_STATUSES = {"draft", "active", "resolved", "archived"}
@@ -141,7 +143,7 @@ def slugify(value: str) -> str:
     return slug or "research-project"
 
 
-def build_markdown(meta: dict[str, Any], arxiv_id: str, full_text: str = "") -> str:
+def build_markdown(meta: dict[str, Any], source_label: str, full_text: str = "") -> str:
     body = clean_extracted_text(full_text)
     full_text_section = (
         f"## Full Text\n\n{body}"
@@ -159,7 +161,7 @@ def build_markdown(meta: dict[str, Any], arxiv_id: str, full_text: str = "") -> 
         f"""
         # {meta['title']}
 
-        Source: arXiv:{arxiv_id}
+        Source: {source_label}
 
         Authors: {', '.join(meta['authors'])}
 
@@ -170,6 +172,41 @@ def build_markdown(meta: dict[str, Any], arxiv_id: str, full_text: str = "") -> 
         {full_text_section}
         """
     ).strip()
+
+
+def upload_title_from_filename(filename: str, fallback: str) -> str:
+    stem = Path(filename or "").name
+    stem = Path(stem).stem if stem else ""
+    title = clean_ws(re.sub(r"[_\-]+", " ", stem))
+    return title or fallback
+
+
+def validate_pdf_bytes(pdf_bytes: bytes) -> None:
+    if len(pdf_bytes) > MAX_UPLOAD_PDF_BYTES:
+        raise ValueError(upload_size_error_message(MAX_UPLOAD_PDF_BYTES))
+    if not pdf_bytes.lstrip().startswith(b"%PDF"):
+        raise ValueError("uploaded file must be a PDF")
+    pdfinfo = shutil.which("pdfinfo")
+    if not pdfinfo:
+        return
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf") as handle:
+            handle.write(pdf_bytes)
+            handle.flush()
+            result = subprocess.run(
+                [pdfinfo, handle.name],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+    except (OSError, subprocess.TimeoutExpired):
+        raise ValueError("uploaded file must be a parseable PDF")
+    if result.returncode != 0:
+        raise ValueError("uploaded file must be a parseable PDF")
+
+
+def upload_size_error_message(limit_bytes: int) -> str:
+    return f"uploaded PDF exceeds {limit_bytes} byte limit"
 
 
 def clean_extracted_text(text: str) -> str:
@@ -468,8 +505,91 @@ class PaperService:
             ),
         )
         paper_dir = self.storage_dir / "papers" / str(paper_id)
-        paper_dir.mkdir(parents=True, exist_ok=True)
         pdf_bytes = fetch_binary(meta["pdf_url"])
+        self._index_paper_artifacts(
+            paper_id=paper_id,
+            paper_dir=paper_dir,
+            meta=meta,
+            source_label=f"arXiv:{arxiv_id}",
+            pdf_bytes=pdf_bytes,
+            pdf_metadata={"source": meta["pdf_url"]},
+            now=now,
+        )
+        return self.get_paper(paper_id)
+
+    def ingest_uploaded_pdf(self, filename: str, pdf_bytes: bytes, title: str = "") -> dict[str, Any]:
+        validate_pdf_bytes(pdf_bytes)
+        source_id = hashlib.sha256(pdf_bytes).hexdigest()
+        existing = self.store.query_one(
+            "SELECT id FROM papers WHERE source_type = 'upload' AND source_id = ?", (source_id,)
+        )
+        if existing:
+            paper = self.get_paper(existing["id"])
+            if paper["status"] == "ready":
+                return paper
+            self.store.execute("DELETE FROM papers WHERE id = ?", (existing["id"],))
+
+        display_title = clean_ws(title) or upload_title_from_filename(filename, f"Uploaded paper {source_id[:12]}")
+        meta = {
+            "title": display_title,
+            "abstract": (
+                "Local PDF uploaded into Open AlphaXiv. Extracted text is stored locally "
+                "for reading, search, graph construction, and paper question answering."
+            ),
+            "authors": ["Local upload"],
+            "published_at": "",
+            "pdf_url": "",
+            "landing_url": "",
+        }
+        now = utcnow()
+        try:
+            paper_id = self.store.execute(
+                """
+                INSERT INTO papers
+                    (source_type, source_id, arxiv_id, title, abstract, authors_json,
+                     published_at, pdf_url, landing_url, status, summary, created_at, updated_at)
+                VALUES ('upload', ?, '', ?, ?, ?, ?, '', '', 'indexing', ?, ?, ?)
+                """,
+                (
+                    source_id,
+                    meta["title"],
+                    meta["abstract"],
+                    dumps(meta["authors"]),
+                    meta["published_at"],
+                    summarize(meta["title"], meta["abstract"]),
+                    now,
+                    now,
+                ),
+            )
+        except sqlite3.IntegrityError:
+            existing = self.store.query_one(
+                "SELECT id FROM papers WHERE source_type = 'upload' AND source_id = ?", (source_id,)
+            )
+            if existing:
+                return self.get_paper(existing["id"])
+            raise
+        self._index_paper_artifacts(
+            paper_id=paper_id,
+            paper_dir=self.storage_dir / "papers" / str(paper_id),
+            meta=meta,
+            source_label=f"upload:{Path(filename or '').name or source_id[:12]}",
+            pdf_bytes=pdf_bytes,
+            pdf_metadata={"source": "upload", "filename": filename, "content_hash": source_id},
+            now=now,
+        )
+        return self.get_paper(paper_id)
+
+    def _index_paper_artifacts(
+        self,
+        paper_id: int,
+        paper_dir: Path,
+        meta: dict[str, Any],
+        source_label: str,
+        pdf_bytes: bytes | None,
+        pdf_metadata: dict[str, Any],
+        now: str,
+    ) -> None:
+        paper_dir.mkdir(parents=True, exist_ok=True)
         full_text = ""
         if pdf_bytes:
             pdf_path = paper_dir / "paper.pdf"
@@ -484,7 +604,7 @@ class PaperService:
                     paper_id,
                     str(pdf_path),
                     hashlib.sha256(pdf_bytes).hexdigest(),
-                    dumps({"source": meta["pdf_url"]}),
+                    dumps(pdf_metadata),
                     now,
                 ),
             )
@@ -543,7 +663,7 @@ class PaperService:
                         now,
                     ),
                 )
-        markdown = build_markdown(meta, arxiv_id, full_text)
+        markdown = build_markdown(meta, source_label, full_text)
         markdown_path = paper_dir / "paper.md"
         markdown_path.write_text(markdown, encoding="utf-8")
         self.store.execute(
@@ -578,7 +698,6 @@ class PaperService:
             "UPDATE papers SET status = 'ready', status_reason = '', updated_at = ? WHERE id = ?",
             (utcnow(), paper_id),
         )
-        return self.get_paper(paper_id)
 
     def _build_paper_graph(self, paper_id: int, markdown: str) -> None:
         chunk_rows = self.store.query_all("SELECT id, text FROM chunks WHERE paper_id = ?", (paper_id,))

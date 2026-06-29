@@ -24,6 +24,7 @@ import {
   Sparkles,
   Tags,
   Type,
+  Upload,
   X
 } from "lucide-react";
 import "./styles.css";
@@ -55,6 +56,8 @@ type Paper = {
   abstract: string;
   authors: string[];
   arxiv_id: string;
+  source_type: string;
+  source_id: string;
   status: string;
   summary: string;
   bookmarked: boolean;
@@ -269,6 +272,8 @@ function App() {
   const [papers, setPapers] = useState<Paper[]>([]);
   const [selectedPaperId, setSelectedPaperId] = useState<number | null>(null);
   const [source, setSource] = useState("https://arxiv.org/abs/2201.08239");
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadInputKey, setUploadInputKey] = useState(0);
   const [query, setQuery] = useState("What is the core contribution?");
   const [answerMode, setAnswerMode] = useState<"mock" | "codex">("mock");
   const [codexSystemPrompt, setCodexSystemPrompt] = useState(() => {
@@ -422,6 +427,31 @@ function App() {
       method: "POST",
       body: JSON.stringify({ source })
     });
+    setSelectedPaperId(paper.id);
+    await refresh();
+    await loadPaperData(paper.id, graphView);
+    setStatus(`Paper ready: ${paper.title}`);
+  }
+
+  async function uploadLocalPaper() {
+    if (!uploadFile) return;
+    setError("");
+    setStatus("Uploading local PDF");
+    const params = new URLSearchParams({ filename: uploadFile.name });
+    const response = await fetch(`${API_URL}/api/papers/upload?${params.toString()}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/pdf"
+      },
+      body: uploadFile
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(errorMessageFromResponse(text, response.statusText));
+    }
+    const paper = (await response.json()) as Paper;
+    setUploadFile(null);
+    setUploadInputKey((key) => key + 1);
     setSelectedPaperId(paper.id);
     await refresh();
     await loadPaperData(paper.id, graphView);
@@ -772,6 +802,24 @@ function App() {
           <button className="primary" type="submit">
             <Plus size={16} /> Import
           </button>
+          <label className="upload-picker">
+            <input
+              key={uploadInputKey}
+              type="file"
+              accept="application/pdf,.pdf"
+              onChange={(event) => setUploadFile(event.target.files?.[0] || null)}
+              aria-label="Local PDF file"
+            />
+            <span>{uploadFile ? uploadFile.name : "PDF"}</span>
+          </label>
+          <button
+            className="primary secondary"
+            type="button"
+            disabled={!uploadFile}
+            onClick={() => uploadLocalPaper().catch((err) => setError(String(err.message || err)))}
+          >
+            <Upload size={16} /> Upload
+          </button>
         </form>
         <div className="topbar-actions">
           <span className={codexStatus?.status === "ready" ? "health ready" : "health"}>
@@ -798,7 +846,7 @@ function App() {
         <button className="quiet-button" onClick={createMockProvider}>
           <Settings size={15} /> Mock provider
         </button>
-        {selectedPaper ? (
+        {selectedPaper?.landing_url ? (
           <a className="quiet-button" href={selectedPaper.landing_url} target="_blank" rel="noreferrer">
             <ExternalLink size={15} /> arXiv
           </a>
@@ -816,7 +864,7 @@ function App() {
             <div className="paper-toolbar">
               <div>
                 <strong>{selectedPaper.title}</strong>
-                <span>arXiv:{selectedPaper.arxiv_id}</span>
+                <span>{paperSourceLabel(selectedPaper)}</span>
               </div>
               <div className="paper-toolbar-meta">
                 {pages.length > 0 ? <span>{pages.length} pages</span> : null}
@@ -1426,7 +1474,7 @@ function App() {
         <div className="empty-state">
           <BookOpen size={28} />
           <h2>No paper imported</h2>
-          <p>Paste an arXiv URL in the top bar.</p>
+          <p>Paste an arXiv URL or upload a local PDF in the top bar.</p>
         </div>
       )}
     </main>
@@ -1643,6 +1691,22 @@ function renderInlineMarkdown(text: string, keyPrefix: string) {
 
 function assetUrl(path: string) {
   return path.startsWith("http") ? path : `${API_URL}${path}`;
+}
+
+function errorMessageFromResponse(text: string, fallback: string) {
+  try {
+    const payload = JSON.parse(text) as { detail?: string };
+    return payload.detail || text || fallback;
+  } catch {
+    return text || fallback;
+  }
+}
+
+function paperSourceLabel(paper: Paper) {
+  if (paper.source_type === "upload") {
+    return `Upload:${paper.source_id.slice(0, 12)}`;
+  }
+  return `arXiv:${paper.arxiv_id}`;
 }
 
 function roundPercent(value: number) {
