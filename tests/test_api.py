@@ -543,6 +543,103 @@ async def test_research_discussions_and_grounding_snapshots_over_http(app: FastA
 
 
 @pytest.mark.asyncio
+async def test_research_discussion_codex_turn_over_http(
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with asgi_client(app) as client:
+        project_response = await client.post(
+            "/api/research/projects",
+            json={
+                "title": "HTTP Codex discussion project",
+                "goal": "Decide the next groundedness experiment.",
+                "current_state": "Baseline HTTP run is complete.",
+            },
+        )
+        project = project_response.json()
+        await client.post(
+            "/api/research/notes",
+            json={
+                "project_id": project["id"],
+                "title": "HTTP Codex evidence",
+                "body_markdown": "Tokenizer normalization is a likely groundedness failure source.",
+            },
+        )
+        await client.post(
+            "/api/experiments/runs",
+            json={
+                "project_id": project["id"],
+                "title": "HTTP Codex baseline",
+                "metrics": {"groundedness": 0.72},
+                "summary": "Groundedness misses the target.",
+            },
+        )
+        discussion_response = await client.post(
+            "/api/research/discussions",
+            json={"project_id": project["id"], "title": "HTTP Codex next steps"},
+        )
+        discussion = discussion_response.json()
+        await client.post(
+            f"/api/research/discussions/{discussion['id']}/messages",
+            json={"role": "user", "content": "We already ran the HTTP baseline."},
+        )
+
+        captured: dict[str, object] = {}
+
+        def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
+            captured["prompt"] = command[-1]
+            return SimpleNamespace(returncode=0, stdout="Inspect tokenizer failures first.", stderr="")
+
+        monkeypatch.setenv("OPEN_ALPHAXIV_CODEX_ENABLED", "true")
+        monkeypatch.setattr("app.services.resolve_executable", lambda path: "/usr/local/bin/codex")
+        monkeypatch.setattr("app.services.codex_credentials_available", lambda options: True)
+        monkeypatch.setattr("app.services.subprocess.run", fake_run)
+
+        response = await client.post(
+            f"/api/research/discussions/{discussion['id']}/codex",
+            json={
+                "content": "What should I try next?",
+                "system_prompt": "Answer in Markdown bullets.",
+            },
+        )
+        messages_response = await client.get(f"/api/research/discussions/{discussion['id']}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["answer"] == "Inspect tokenizer failures first."
+    assert payload["user_message"]["content"] == "What should I try next?"
+    assert payload["assistant_message"]["role"] == "assistant"
+    assert payload["assistant_message"]["metadata"]["provider"] == "codex"
+    assert payload["assistant_message"]["metadata"]["answer_mode"] == "codex"
+    assert payload["assistant_message"]["metadata"]["grounding_snapshot_id"] == payload["grounding_snapshot"]["id"]
+    assert payload["grounding_snapshot"]["discussion_message_id"] == payload["user_message"]["id"]
+    assert [message["role"] for message in messages_response.json()["messages"]] == ["user", "user", "assistant"]
+    prompt = str(captured["prompt"])
+    assert "HTTP Codex evidence" in prompt
+    assert "HTTP Codex baseline" in prompt
+    assert "Baseline HTTP run is complete." in prompt
+    assert "We already ran the HTTP baseline." in prompt
+    assert "Answer in Markdown bullets." in prompt
+
+
+@pytest.mark.asyncio
+async def test_research_discussion_codex_requires_enablement_over_http(app: FastAPI) -> None:
+    async with asgi_client(app) as client:
+        project_response = await client.post("/api/research/projects", json={"title": "HTTP disabled Codex"})
+        discussion_response = await client.post(
+            "/api/research/discussions",
+            json={"project_id": project_response.json()["id"], "title": "Disabled Codex"},
+        )
+        response = await client.post(
+            f"/api/research/discussions/{discussion_response.json()['id']}/codex",
+            json={"content": "Try Codex"},
+        )
+
+    assert response.status_code == 400
+    assert "OPEN_ALPHAXIV_CODEX_ENABLED" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
 async def test_grounding_snapshot_rejects_unknown_project_over_http(app: FastAPI) -> None:
     async with asgi_client(app) as client:
         response = await client.post(

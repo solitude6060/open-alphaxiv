@@ -8,7 +8,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.services import PaperService, build_codex_paper_prompt, extract_pdf_text_layers, normalize_arxiv_id
+from app.services import (
+    PaperService,
+    build_codex_paper_prompt,
+    build_codex_research_discussion_prompt,
+    extract_pdf_text_layers,
+    normalize_arxiv_id,
+)
 from app.store import Store
 
 
@@ -864,6 +870,155 @@ def test_research_discussions_grounding_snapshots_and_export(service: PaperServi
     assert "## Grounding Snapshots" in exported
     assert "Baseline grounding" in exported
     assert "It supports the claim" in exported
+
+
+def test_research_discussion_codex_turn_persists_grounded_answer(
+    service: PaperService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = service.create_research_project(
+        {
+            "title": "Grounded Codex project",
+            "goal": "Decide the next experiment.",
+            "current_state": "Baseline run is complete.",
+        }
+    )
+    service.create_research_question(
+        {"project_id": project["id"], "question": "Should we tune tokenizer normalization?"}
+    )
+    note = service.create_research_note(
+        {
+            "project_id": project["id"],
+            "title": "Paper evidence",
+            "body_markdown": "The paper reports factual grounding improves with retrieval tools.",
+            "note_type": "literature_note",
+        }
+    )
+    run = service.create_experiment_run(
+        {
+            "project_id": project["id"],
+            "title": "Baseline run",
+            "dataset": "dialog eval",
+            "metrics": {"groundedness": 0.74},
+            "summary": "Groundedness is below target.",
+        }
+    )
+    discussion = service.create_research_discussion(
+        {"project_id": project["id"], "title": "Plan next groundedness experiment"}
+    )
+    service.create_research_discussion_message(
+        discussion["id"],
+        {"role": "user", "content": "We already ran the baseline. What should we inspect?"},
+    )
+    captured: dict[str, object] = {}
+
+    def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(returncode=0, stdout="Inspect retrieval failures and tokenizer normalization.", stderr="ok")
+
+    monkeypatch.setattr("app.services.resolve_executable", lambda path: "/usr/local/bin/codex")
+    monkeypatch.setattr("app.services.codex_credentials_available", lambda options: True)
+    monkeypatch.setattr("app.services.subprocess.run", fake_run)
+
+    result = service.ask_research_discussion_codex(
+        discussion["id"],
+        {
+            "content": "What should I try next?",
+            "system_prompt": "Answer in Markdown bullets.",
+        },
+        codex_options={
+            "enabled": True,
+            "cli_path": "codex",
+            "timeout_seconds": 5,
+            "sandbox": "read-only",
+            "cwd": tmp_path,
+        },
+    )
+
+    messages = service.research_discussion_messages(discussion["id"])
+    assistant_message = result["assistant_message"]
+    user_message = result["user_message"]
+    snapshot = result["grounding_snapshot"]
+    prompt = str(captured["command"][-1])
+
+    assert result["answer"] == "Inspect retrieval failures and tokenizer normalization."
+    assert [message["role"] for message in messages] == ["user", "user", "assistant"]
+    assert user_message["content"] == "What should I try next?"
+    assert assistant_message["content"] == result["answer"]
+    assert assistant_message["metadata"]["provider"] == "codex"
+    assert assistant_message["metadata"]["answer_mode"] == "codex"
+    assert assistant_message["metadata"]["user_message_id"] == user_message["id"]
+    assert assistant_message["metadata"]["grounding_snapshot_id"] == snapshot["id"]
+    assert assistant_message["metadata"]["context_strategy"] == "research_grounding_snapshot"
+    assert assistant_message["metadata"]["grounding_snapshot_chars"] > 0
+    assert snapshot["discussion_message_id"] == user_message["id"]
+    assert note["title"] in prompt
+    assert run["title"] in prompt
+    assert "Baseline run is complete." in prompt
+    assert "We already ran the baseline" in prompt
+    assert "Answer in Markdown bullets." in prompt
+    assert "Grounding snapshot:" in prompt
+    assert "--sandbox" in captured["command"]
+    assert captured["kwargs"]["cwd"] == str(tmp_path)
+
+
+def test_codex_research_discussion_prompt_truncates_large_context() -> None:
+    prompt = build_codex_research_discussion_prompt(
+        project={"title": "Large project", "goal": "Find signal", "current_state": "Collecting evidence"},
+        query="What matters?",
+        grounding_snapshot="word " * 50_000,
+        discussion_history=[{"role": "user", "content": "Previous question"}],
+        system_prompt="Use bullets.",
+    )
+
+    assert "Research grounding context was truncated" in prompt
+    assert len(prompt) < 90_000
+
+
+def test_research_discussion_codex_requires_enablement(service: PaperService) -> None:
+    project = service.create_research_project({"title": "Disabled Codex"})
+    discussion = service.create_research_discussion({"project_id": project["id"], "title": "Disabled"})
+
+    with pytest.raises(ValueError, match="OPEN_ALPHAXIV_CODEX_ENABLED"):
+        service.ask_research_discussion_codex(
+            discussion["id"],
+            {"content": "Try Codex"},
+            codex_options={"enabled": False},
+        )
+
+
+def test_research_discussion_codex_failure_does_not_persist_partial_turn(
+    service: PaperService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = service.create_research_project({"title": "Failed Codex project", "current_state": "Ready"})
+    discussion = service.create_research_discussion({"project_id": project["id"], "title": "Failed turn"})
+
+    def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(returncode=1, stdout="", stderr="codex failed")
+
+    monkeypatch.setattr("app.services.resolve_executable", lambda path: "/usr/local/bin/codex")
+    monkeypatch.setattr("app.services.codex_credentials_available", lambda options: True)
+    monkeypatch.setattr("app.services.subprocess.run", fake_run)
+
+    with pytest.raises(RuntimeError, match="codex failed"):
+        service.ask_research_discussion_codex(
+            discussion["id"],
+            {"content": "What failed?"},
+            codex_options={
+                "enabled": True,
+                "cli_path": "codex",
+                "timeout_seconds": 5,
+                "sandbox": "read-only",
+                "cwd": tmp_path,
+            },
+        )
+
+    assert service.research_discussion_messages(discussion["id"]) == []
+    assert service.list_grounding_snapshots(project["id"]) == []
 
 
 def test_discussion_message_references_follow_message_lifecycle(service: PaperService) -> None:

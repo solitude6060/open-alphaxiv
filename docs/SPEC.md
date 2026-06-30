@@ -371,6 +371,16 @@ Fields:
 - `metadata_json`
 - `created_at`
 
+Codex assistant message metadata must include:
+
+- `provider=codex`
+- `answer_mode=codex`
+- `context_strategy=research_grounding_snapshot`
+- `user_message_id`
+- `grounding_snapshot_id`
+- `grounding_snapshot_chars`
+- Codex runtime metadata such as CLI path, sandbox, stderr preview, and model.
+
 ### GroundingSnapshot
 
 Frozen Markdown context for a project-level discussion.
@@ -480,6 +490,10 @@ Constraints:
 - `GET /api/research/discussions`
 - `GET /api/research/discussions/{discussion_id}`
 - `POST /api/research/discussions/{discussion_id}/messages`
+- `POST /api/research/discussions/{discussion_id}/codex`
+  - Creates a user discussion message, freezes a grounding snapshot tied to
+    that message, runs local `codex exec` with project-level context, and stores
+    the answer as an assistant discussion message.
 - `POST /api/research/projects/{project_id}/grounding-snapshots`
 - `GET /api/research/projects/{project_id}/grounding-snapshots`
 - `GET /api/research/grounding-snapshots/{snapshot_id}`
