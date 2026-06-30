@@ -416,6 +416,11 @@ a {
   font-size: 13px;
 }
 
+.quiet-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .primary,
 .tabs button {
   border: 0;
@@ -1256,6 +1261,16 @@ textarea {
   min-height: 34px;
 }
 
+.discussion-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.discussion-thread {
+  max-height: 280px;
+  overflow: auto;
+}
+
 .research-list {
   display: grid;
   gap: 8px;
@@ -1322,6 +1337,10 @@ textarea {
   color: #203038;
   font-size: 13px;
   line-height: 1.45;
+}
+
+.discussion-message p {
+  white-space: pre-wrap;
 }
 
 .research-row span,

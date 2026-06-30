@@ -1986,6 +1986,80 @@ class PaperService:
         )
         return self.get_grounding_snapshot(snapshot_id)
 
+    def ask_research_discussion_codex(
+        self,
+        discussion_id: int,
+        payload: dict[str, Any],
+        codex_options: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        options = codex_options or {}
+        discussion = self.get_research_discussion(discussion_id)
+        project = self.get_research_project(discussion["project_id"])
+        query = clean_ws(str(payload.get("content") or ""))
+        if not query:
+            raise ValueError("content is required")
+        _prepare_codex_exec(options, "Codex research discussion is disabled. Set OPEN_ALPHAXIV_CODEX_ENABLED=true.")
+        system_prompt = clean_ws(str(payload.get("system_prompt") or ""))[:4000]
+        conversation_history = discussion["messages"][-12:]
+        user_message = self.create_research_discussion_message(
+            discussion_id,
+            {
+                "role": "user",
+                "content": query,
+                "metadata": {"source": "codex_research_discussion_turn"},
+            },
+        )
+        snapshot = self.create_grounding_snapshot(
+            project["id"],
+            {
+                "title": f"Codex grounding: {discussion['title']}",
+                "discussion_message_id": user_message["id"],
+            },
+        )
+        prompt = build_codex_research_discussion_prompt(
+            project=project,
+            query=query,
+            grounding_snapshot=snapshot["content_markdown"],
+            discussion_history=conversation_history,
+            system_prompt=system_prompt,
+        )
+        answer, run_metadata = _run_codex_exec_prompt(
+            prompt,
+            options,
+            "Codex research discussion is disabled. Set OPEN_ALPHAXIV_CODEX_ENABLED=true.",
+            "Codex research discussion",
+        )
+        metadata = {
+            "provider": "codex",
+            "model": run_metadata.get("model") or "codex-local-agent",
+            "answer_mode": "codex",
+            "context_strategy": "research_grounding_snapshot",
+            "user_message_id": user_message["id"],
+            "grounding_snapshot_id": snapshot["id"],
+            "grounding_snapshot_chars": len(snapshot["content_markdown"]),
+            "system_prompt_preview": system_prompt[:240],
+            "system_prompt_chars": len(system_prompt),
+            "conversation_message_count": len(conversation_history),
+            "project_id": project["id"],
+            "discussion_id": discussion_id,
+            **run_metadata,
+        }
+        assistant_message = self.create_research_discussion_message(
+            discussion_id,
+            {
+                "role": "assistant",
+                "content": answer,
+                "metadata": metadata,
+            },
+        )
+        return {
+            "discussion_id": discussion_id,
+            "user_message": user_message,
+            "assistant_message": assistant_message,
+            "grounding_snapshot": snapshot,
+            "answer": answer,
+        }
+
     def build_grounding_snapshot_content(self, project_id: int) -> tuple[str, dict[str, Any]]:
         project = self.get_research_project(project_id)
         questions = self.list_research_questions(project_id=project_id)
@@ -2383,20 +2457,6 @@ def codex_answer(
     file_references: dict[str, str],
     options: dict[str, Any],
 ) -> tuple[str, dict[str, Any]]:
-    if not options.get("enabled"):
-        raise ValueError("Codex paper chat is disabled. Set OPEN_ALPHAXIV_CODEX_ENABLED=true.")
-    cli_path = str(options.get("cli_path") or "codex")
-    resolved_cli = resolve_executable(cli_path)
-    if not resolved_cli:
-        raise ValueError(f"Codex CLI not found: {cli_path}")
-    if not codex_credentials_available(options):
-        raise ValueError("Codex credentials were not detected for this backend process.")
-
-    timeout_seconds = int(options.get("timeout_seconds") or 180)
-    sandbox = str(options.get("sandbox") or "read-only")
-    if sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
-        sandbox = "read-only"
-    model = str(options.get("model") or "")
     prompt = build_codex_paper_prompt(
         paper,
         query,
@@ -2407,21 +2467,67 @@ def codex_answer(
         conversation_history,
         file_references,
     )
-    command = [
-        resolved_cli,
-        "exec",
-        "--ephemeral",
-        "--sandbox",
-        sandbox,
-        "--skip-git-repo-check",
-    ]
-    if model:
-        command.extend(["--model", model])
-    command.append(prompt)
+    answer, exec_metadata = _run_codex_exec_prompt(
+        prompt,
+        options,
+        "Codex paper chat is disabled. Set OPEN_ALPHAXIV_CODEX_ENABLED=true.",
+        "Codex paper chat",
+    )
+    return answer, {
+        **exec_metadata,
+        "context_strategy": "full_text",
+        "context_scope": "selection" if selected_text or selected_image else "whole_paper",
+        "paper_context_chars": len(paper_context),
+        "system_prompt_chars": len(system_prompt),
+        "conversation_message_count": len(conversation_history),
+        "paper_file_references": file_references,
+    }
+
+
+def _prepare_codex_exec(options: dict[str, Any], disabled_message: str) -> dict[str, Any]:
+    if not options.get("enabled"):
+        raise ValueError(disabled_message)
+    cli_path = str(options.get("cli_path") or "codex")
+    resolved_cli = resolve_executable(cli_path)
+    if not resolved_cli:
+        raise ValueError(f"Codex CLI not found: {cli_path}")
+    if not codex_credentials_available(options):
+        raise ValueError("Codex credentials were not detected for this backend process.")
+    timeout_seconds = int(options.get("timeout_seconds") or 180)
+    sandbox = str(options.get("sandbox") or "read-only")
+    if sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
+        sandbox = "read-only"
     env = os.environ.copy()
     codex_home = str(options.get("codex_home") or "")
     if codex_home:
         env["CODEX_HOME"] = codex_home
+    return {
+        "resolved_cli": resolved_cli,
+        "timeout_seconds": timeout_seconds,
+        "sandbox": sandbox,
+        "model": str(options.get("model") or ""),
+        "env": env,
+    }
+
+
+def _run_codex_exec_prompt(
+    prompt: str,
+    options: dict[str, Any],
+    disabled_message: str,
+    failure_label: str,
+) -> tuple[str, dict[str, Any]]:
+    prepared = _prepare_codex_exec(options, disabled_message)
+    command = [
+        prepared["resolved_cli"],
+        "exec",
+        "--ephemeral",
+        "--sandbox",
+        prepared["sandbox"],
+        "--skip-git-repo-check",
+    ]
+    if prepared["model"]:
+        command.extend(["--model", prepared["model"]])
+    command.append(prompt)
     explicit_cwd = options.get("cwd")
     try:
         if explicit_cwd:
@@ -2430,8 +2536,8 @@ def codex_answer(
                 cwd=str(explicit_cwd),
                 capture_output=True,
                 text=True,
-                timeout=timeout_seconds,
-                env=env,
+                timeout=prepared["timeout_seconds"],
+                env=prepared["env"],
             )
         else:
             with tempfile.TemporaryDirectory(prefix="open-alphaxiv-codex-") as codex_cwd:
@@ -2440,30 +2546,24 @@ def codex_answer(
                     cwd=codex_cwd,
                     capture_output=True,
                     text=True,
-                    timeout=timeout_seconds,
-                    env=env,
+                    timeout=prepared["timeout_seconds"],
+                    env=prepared["env"],
                 )
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"Codex paper chat timed out after {timeout_seconds} seconds.") from exc
+        raise RuntimeError(f"{failure_label} timed out after {prepared['timeout_seconds']} seconds.") from exc
     except OSError as exc:
-        raise RuntimeError(f"Codex paper chat could not start: {exc}") from exc
+        raise RuntimeError(f"{failure_label} could not start: {exc}") from exc
     if result.returncode != 0:
         stderr = clean_ws(result.stderr)[-500:]
-        raise RuntimeError(f"Codex paper chat failed: {stderr or 'codex exec exited with an error'}")
+        raise RuntimeError(f"{failure_label} failed: {stderr or 'codex exec exited with an error'}")
     answer = result.stdout.strip()
     if not answer:
-        raise RuntimeError("Codex paper chat returned an empty answer.")
+        raise RuntimeError(f"{failure_label} returned an empty answer.")
     return answer, {
-        "codex_sandbox": sandbox,
-        "codex_cli_path": resolved_cli,
+        "codex_sandbox": prepared["sandbox"],
+        "codex_cli_path": prepared["resolved_cli"],
         "codex_stderr_preview": clean_ws(result.stderr)[-500:],
-        "context_strategy": "full_text",
-        "context_scope": "selection" if selected_text or selected_image else "whole_paper",
-        "paper_context_chars": len(paper_context),
-        "system_prompt_chars": len(system_prompt),
-        "conversation_message_count": len(conversation_history),
-        "paper_file_references": file_references,
-        "model": model or "codex-local-agent",
+        "model": prepared["model"] or "codex-local-agent",
     }
 
 
@@ -2535,6 +2635,58 @@ def build_codex_paper_prompt(
         {query}
 
         Paper context:
+        {context}
+        """
+    ).strip()
+
+
+def build_codex_research_discussion_prompt(
+    project: dict[str, Any],
+    query: str,
+    grounding_snapshot: str,
+    discussion_history: list[dict[str, Any]] | None = None,
+    system_prompt: str = "",
+) -> str:
+    context_limit = 75_000
+    clean_snapshot = clean_extracted_text(grounding_snapshot)
+    if clean_snapshot:
+        truncated = len(clean_snapshot) > context_limit
+        context = clean_snapshot[:context_limit]
+        if truncated:
+            context = (
+                context.rsplit(" ", 1)[0]
+                + "\n\n[Research grounding context was truncated to fit the local Codex prompt budget.]"
+            )
+    else:
+        context = "(No research grounding snapshot is available.)"
+    history = format_conversation_history(discussion_history or [])
+    custom_instructions = clean_ws(system_prompt)[:4000] or "(none)"
+    return textwrap.dedent(
+        f"""
+        You are a project-level research assistant inside Open AlphaXiv Local.
+
+        Constraints:
+        - Use only the project state, discussion history, user question, and grounding snapshot below.
+        - Do not edit files, run shell commands, browse the web, or ask for more context.
+        - If the evidence is insufficient, say exactly what project data, experiment data, paper evidence, or code evidence is missing.
+        - Preserve continuity with the discussion history when it is relevant.
+        - Answer in Markdown.
+
+        User-configured system prompt:
+        {custom_instructions}
+
+        Project:
+        Title: {project.get('title') or '(untitled)'}
+        Goal: {project.get('goal') or '(none)'}
+        Current state: {project.get('current_state') or '(none)'}
+
+        Discussion history:
+        {history}
+
+        Question:
+        {query}
+
+        Grounding snapshot:
         {context}
         """
     ).strip()

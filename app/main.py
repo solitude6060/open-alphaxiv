@@ -185,6 +185,11 @@ class ResearchDiscussionMessageCreate(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class ResearchDiscussionCodexAsk(BaseModel):
+    content: str
+    system_prompt: str = ""
+
+
 class GroundingSnapshotCreate(BaseModel):
     title: str = ""
     discussion_message_id: int | None = None
@@ -655,6 +660,23 @@ def create_app() -> FastAPI:
         try:
             return await to_thread(service().create_research_discussion_message, discussion_id, payload.model_dump())
         except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+
+    @app.post("/api/research/discussions/{discussion_id}/codex")
+    async def ask_research_discussion_codex(
+        discussion_id: int,
+        payload: ResearchDiscussionCodexAsk,
+    ) -> dict[str, Any]:
+        try:
+            return await to_thread(
+                service().ask_research_discussion_codex,
+                discussion_id,
+                payload.model_dump(),
+                codex_options(),
+            )
+        except (ValueError, RuntimeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc

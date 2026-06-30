@@ -29,6 +29,9 @@ context.
   summaries, and artifact references.
 - Record project-level research discussions and freeze grounding snapshots for
   later review.
+- Ask Codex inside project-level research discussions using the current project
+  state, notes, experiment runs, discussion history, and a frozen grounding
+  snapshot.
 - Search local research projects, notes, experiment runs, discussions, and
   snapshots from a compact research status dashboard.
 - Export a research project as readable Markdown with paper and chat citations.
@@ -101,6 +104,13 @@ stored in browser local storage and sent only when Codex answer mode is used,
 so you can control answer language, Markdown structure, JSON-only output, or
 other response formatting instructions without changing backend environment
 variables.
+
+The same local Codex boundary is available from Research Discussions. A Codex
+discussion turn stores the user question, freezes a grounding snapshot of the
+project, sends the project state, notes, experiment runs, and recent discussion
+history to `codex exec`, then stores the Markdown answer as an assistant
+message. This gives project-level research notes and experiment data a durable
+conversational surface without exposing raw retrieval chunks in the reader.
 
 Codex login is handled by the host CLI, not by the web UI:
 

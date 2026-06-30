@@ -254,6 +254,17 @@ type ResearchDiscussion = {
   title: string;
   status: string;
   message_count: number;
+  messages?: ResearchDiscussionMessage[];
+};
+
+type ResearchDiscussionMessage = {
+  id: number;
+  discussion_id: number;
+  project_id: number;
+  role: "user" | "assistant" | "system";
+  content: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
 };
 
 type GroundingSnapshot = {
@@ -339,6 +350,7 @@ function App() {
   const [researchDashboard, setResearchDashboard] = useState<ResearchDashboard | null>(null);
   const [researchSearchResults, setResearchSearchResults] = useState<ResearchSearchResult[]>([]);
   const [selectedDiscussionId, setSelectedDiscussionId] = useState<number | null>(null);
+  const [selectedDiscussion, setSelectedDiscussion] = useState<ResearchDiscussion | null>(null);
   const [projectTitle, setProjectTitle] = useState("New research project");
   const [projectGoal, setProjectGoal] = useState("");
   const [projectCurrentState, setProjectCurrentState] = useState("");
@@ -388,7 +400,7 @@ function App() {
     setStatus("Ready");
   }
 
-  async function refreshResearch(preferredProjectId?: number) {
+  async function refreshResearch(preferredProjectId?: number, preferredDiscussionId?: number | null) {
     const [projects, dashboard] = await Promise.all([
       request<ResearchProject[]>("/api/research/projects"),
       request<ResearchDashboard>("/api/research/dashboard")
@@ -404,6 +416,7 @@ function App() {
       setResearchDiscussions([]);
       setGroundingSnapshots([]);
       setSelectedDiscussionId(null);
+      setSelectedDiscussion(null);
       return;
     }
     const [questions, notes, runs, discussions, snapshots] = await Promise.all([
@@ -418,7 +431,17 @@ function App() {
     setExperimentRuns(runs);
     setResearchDiscussions(discussions);
     setGroundingSnapshots(snapshots);
-    setSelectedDiscussionId((current) => current || discussions[0]?.id || null);
+    const currentDiscussionId = preferredDiscussionId || selectedDiscussionId;
+    const nextDiscussionId =
+      currentDiscussionId && discussions.some((discussion) => discussion.id === currentDiscussionId)
+        ? currentDiscussionId
+        : discussions[0]?.id || null;
+    setSelectedDiscussionId(nextDiscussionId);
+    if (nextDiscussionId) {
+      setSelectedDiscussion(await request<ResearchDiscussion>(`/api/research/discussions/${nextDiscussionId}`));
+    } else {
+      setSelectedDiscussion(null);
+    }
   }
 
   useEffect(() => {
@@ -454,6 +477,16 @@ function App() {
       refreshResearch(selectedProjectId).catch((err) => setError(String(err.message || err)));
     }
   }, [selectedProjectId]);
+
+  useEffect(() => {
+    if (!selectedDiscussionId) {
+      setSelectedDiscussion(null);
+      return;
+    }
+    request<ResearchDiscussion>(`/api/research/discussions/${selectedDiscussionId}`)
+      .then(setSelectedDiscussion)
+      .catch((err) => setError(String(err.message || err)));
+  }, [selectedDiscussionId]);
 
   useEffect(() => {
     setProjectGoal(selectedProject?.goal || "");
@@ -720,7 +753,7 @@ function App() {
     });
     setSelectedDiscussionId(discussion.id);
     setDiscussionTitle("Research discussion");
-    await refreshResearch(selectedProjectId);
+    await refreshResearch(selectedProjectId, discussion.id);
     setStatus("Research discussion created");
   }
 
@@ -731,8 +764,23 @@ function App() {
       body: JSON.stringify({ role: "user", content: discussionMessage.trim() })
     });
     setDiscussionMessage("");
-    await refreshResearch(selectedProjectId);
+    await refreshResearch(selectedProjectId, selectedDiscussionId);
     setStatus("Discussion message saved");
+  }
+
+  async function askResearchDiscussionCodex() {
+    if (!selectedProjectId || !selectedDiscussionId || !discussionMessage.trim()) return;
+    setStatus("Asking Codex about research discussion");
+    await request(`/api/research/discussions/${selectedDiscussionId}/codex`, {
+      method: "POST",
+      body: JSON.stringify({
+        content: discussionMessage.trim(),
+        system_prompt: codexSystemPrompt
+      })
+    });
+    setDiscussionMessage("");
+    await refreshResearch(selectedProjectId, selectedDiscussionId);
+    setStatus("Codex discussion answer saved");
   }
 
   async function createGroundingSnapshot() {
@@ -1545,6 +1593,24 @@ function App() {
                         ))}
                       </select>
                     ) : null}
+                    {selectedDiscussion ? (
+                      <div className="research-list discussion-thread">
+                        <strong>Discussion</strong>
+                        {selectedDiscussion.messages?.length ? (
+                          selectedDiscussion.messages.map((message) => (
+                            <article key={message.id} className={`research-row discussion-message ${message.role}`}>
+                              <div className="research-row-title">
+                                <span>{message.role}</span>
+                                <small>{new Date(message.created_at).toLocaleString()}</small>
+                              </div>
+                              <p>{message.content}</p>
+                            </article>
+                          ))
+                        ) : (
+                          <span>No messages yet.</span>
+                        )}
+                      </div>
+                    ) : null}
                     <label className="field-label">
                       Discussion message
                       <textarea
@@ -1553,15 +1619,28 @@ function App() {
                         placeholder="Record a project-level research discussion message..."
                       />
                     </label>
-                    <button
-                      className="quiet-button wide-button"
-                      type="button"
-                      onClick={() =>
-                        addResearchDiscussionMessage().catch((err) => setError(String(err.message || err)))
-                      }
-                    >
-                      <Clipboard size={15} /> Save discussion message
-                    </button>
+                    <div className="research-actions discussion-actions">
+                      <button
+                        className="quiet-button"
+                        type="button"
+                        disabled={!selectedDiscussionId || !discussionMessage.trim()}
+                        onClick={() =>
+                          addResearchDiscussionMessage().catch((err) => setError(String(err.message || err)))
+                        }
+                      >
+                        <Clipboard size={15} /> Save
+                      </button>
+                      <button
+                        className="primary"
+                        type="button"
+                        disabled={!selectedDiscussionId || !discussionMessage.trim() || !codexStatus?.codex_chat_available}
+                        onClick={() =>
+                          askResearchDiscussionCodex().catch((err) => setError(String(err.message || err)))
+                        }
+                      >
+                        <Sparkles size={15} /> Ask Codex
+                      </button>
+                    </div>
                     <label className="field-label">
                       Snapshot title
                       <input
