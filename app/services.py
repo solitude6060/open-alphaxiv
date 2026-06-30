@@ -1969,6 +1969,22 @@ class PaperService:
             if message["project_id"] != project_id:
                 raise ValueError("discussion_message_id must belong to the project")
         content, metadata = self.build_grounding_snapshot_content(project_id)
+        return self._insert_grounding_snapshot(
+            project=project,
+            discussion_message_id=int(discussion_message_id) if discussion_message_id else None,
+            title=clean_ws(str(payload.get("title") or f"Grounding snapshot for {project['title']}")),
+            content=content,
+            metadata=metadata,
+        )
+
+    def _insert_grounding_snapshot(
+        self,
+        project: dict[str, Any],
+        discussion_message_id: int | None,
+        title: str,
+        content: str,
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
         snapshot_id = self.store.execute(
             """
             INSERT INTO grounding_snapshots
@@ -1976,9 +1992,9 @@ class PaperService:
             VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
-                project_id,
-                int(discussion_message_id) if discussion_message_id else None,
-                clean_ws(str(payload.get("title") or f"Grounding snapshot for {project['title']}")),
+                project["id"],
+                discussion_message_id,
+                title,
                 content,
                 dumps(metadata),
                 utcnow(),
@@ -2001,25 +2017,11 @@ class PaperService:
         _prepare_codex_exec(options, "Codex research discussion is disabled. Set OPEN_ALPHAXIV_CODEX_ENABLED=true.")
         system_prompt = clean_ws(str(payload.get("system_prompt") or ""))[:4000]
         conversation_history = discussion["messages"][-12:]
-        user_message = self.create_research_discussion_message(
-            discussion_id,
-            {
-                "role": "user",
-                "content": query,
-                "metadata": {"source": "codex_research_discussion_turn"},
-            },
-        )
-        snapshot = self.create_grounding_snapshot(
-            project["id"],
-            {
-                "title": f"Codex grounding: {discussion['title']}",
-                "discussion_message_id": user_message["id"],
-            },
-        )
+        snapshot_content, snapshot_metadata = self.build_grounding_snapshot_content(project["id"])
         prompt = build_codex_research_discussion_prompt(
             project=project,
             query=query,
-            grounding_snapshot=snapshot["content_markdown"],
+            grounding_snapshot=snapshot_content,
             discussion_history=conversation_history,
             system_prompt=system_prompt,
         )
@@ -2029,9 +2031,23 @@ class PaperService:
             "Codex research discussion is disabled. Set OPEN_ALPHAXIV_CODEX_ENABLED=true.",
             "Codex research discussion",
         )
+        user_message = self.create_research_discussion_message(
+            discussion_id,
+            {
+                "role": "user",
+                "content": query,
+                "metadata": {"source": "codex_research_discussion_turn"},
+            },
+        )
+        snapshot = self._insert_grounding_snapshot(
+            project=project,
+            discussion_message_id=user_message["id"],
+            title=f"Codex grounding: {discussion['title']}",
+            content=snapshot_content,
+            metadata=snapshot_metadata,
+        )
         metadata = {
             "provider": "codex",
-            "model": run_metadata.get("model") or "codex-local-agent",
             "answer_mode": "codex",
             "context_strategy": "research_grounding_snapshot",
             "user_message_id": user_message["id"],
@@ -2661,6 +2677,9 @@ def build_codex_research_discussion_prompt(
         context = "(No research grounding snapshot is available.)"
     history = format_conversation_history(discussion_history or [])
     custom_instructions = clean_ws(system_prompt)[:4000] or "(none)"
+    title = clean_ws(str(project.get("title") or ""))[:1000] or "(untitled)"
+    goal = clean_ws(str(project.get("goal") or ""))[:4000] or "(none)"
+    current_state = clean_ws(str(project.get("current_state") or ""))[:4000] or "(none)"
     return textwrap.dedent(
         f"""
         You are a project-level research assistant inside Open AlphaXiv Local.
@@ -2676,9 +2695,9 @@ def build_codex_research_discussion_prompt(
         {custom_instructions}
 
         Project:
-        Title: {project.get('title') or '(untitled)'}
-        Goal: {project.get('goal') or '(none)'}
-        Current state: {project.get('current_state') or '(none)'}
+        Title: {title}
+        Goal: {goal}
+        Current state: {current_state}
 
         Discussion history:
         {history}

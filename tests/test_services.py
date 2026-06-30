@@ -989,6 +989,38 @@ def test_research_discussion_codex_requires_enablement(service: PaperService) ->
         )
 
 
+def test_research_discussion_codex_failure_does_not_persist_partial_turn(
+    service: PaperService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = service.create_research_project({"title": "Failed Codex project", "current_state": "Ready"})
+    discussion = service.create_research_discussion({"project_id": project["id"], "title": "Failed turn"})
+
+    def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(returncode=1, stdout="", stderr="codex failed")
+
+    monkeypatch.setattr("app.services.resolve_executable", lambda path: "/usr/local/bin/codex")
+    monkeypatch.setattr("app.services.codex_credentials_available", lambda options: True)
+    monkeypatch.setattr("app.services.subprocess.run", fake_run)
+
+    with pytest.raises(RuntimeError, match="codex failed"):
+        service.ask_research_discussion_codex(
+            discussion["id"],
+            {"content": "What failed?"},
+            codex_options={
+                "enabled": True,
+                "cli_path": "codex",
+                "timeout_seconds": 5,
+                "sandbox": "read-only",
+                "cwd": tmp_path,
+            },
+        )
+
+    assert service.research_discussion_messages(discussion["id"]) == []
+    assert service.list_grounding_snapshots(project["id"]) == []
+
+
 def test_discussion_message_references_follow_message_lifecycle(service: PaperService) -> None:
     project = service.create_research_project({"title": "Message lifecycle"})
     discussion = service.create_research_discussion({"project_id": project["id"], "title": "Lifecycle"})

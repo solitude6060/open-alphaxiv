@@ -186,8 +186,8 @@ class ResearchDiscussionMessageCreate(BaseModel):
 
 
 class ResearchDiscussionCodexAsk(BaseModel):
-    content: str
-    system_prompt: str = ""
+    content: str = Field(..., max_length=5000)
+    system_prompt: str = Field(default="", max_length=4000)
 
 
 class GroundingSnapshotCreate(BaseModel):

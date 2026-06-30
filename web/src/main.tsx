@@ -351,6 +351,7 @@ function App() {
   const [researchSearchResults, setResearchSearchResults] = useState<ResearchSearchResult[]>([]);
   const [selectedDiscussionId, setSelectedDiscussionId] = useState<number | null>(null);
   const [selectedDiscussion, setSelectedDiscussion] = useState<ResearchDiscussion | null>(null);
+  const [researchCodexBusy, setResearchCodexBusy] = useState(false);
   const [projectTitle, setProjectTitle] = useState("New research project");
   const [projectGoal, setProjectGoal] = useState("");
   const [projectCurrentState, setProjectCurrentState] = useState("");
@@ -400,6 +401,10 @@ function App() {
     setStatus("Ready");
   }
 
+  async function loadResearchDiscussion(discussionId: number) {
+    setSelectedDiscussion(await request<ResearchDiscussion>(`/api/research/discussions/${discussionId}`));
+  }
+
   async function refreshResearch(preferredProjectId?: number, preferredDiscussionId?: number | null) {
     const [projects, dashboard] = await Promise.all([
       request<ResearchProject[]>("/api/research/projects"),
@@ -438,7 +443,11 @@ function App() {
         : discussions[0]?.id || null;
     setSelectedDiscussionId(nextDiscussionId);
     if (nextDiscussionId) {
-      setSelectedDiscussion(await request<ResearchDiscussion>(`/api/research/discussions/${nextDiscussionId}`));
+      if (nextDiscussionId === selectedDiscussionId) {
+        await loadResearchDiscussion(nextDiscussionId);
+      } else {
+        setSelectedDiscussion(null);
+      }
     } else {
       setSelectedDiscussion(null);
     }
@@ -483,9 +492,7 @@ function App() {
       setSelectedDiscussion(null);
       return;
     }
-    request<ResearchDiscussion>(`/api/research/discussions/${selectedDiscussionId}`)
-      .then(setSelectedDiscussion)
-      .catch((err) => setError(String(err.message || err)));
+    loadResearchDiscussion(selectedDiscussionId).catch((err) => setError(String(err.message || err)));
   }, [selectedDiscussionId]);
 
   useEffect(() => {
@@ -769,18 +776,23 @@ function App() {
   }
 
   async function askResearchDiscussionCodex() {
-    if (!selectedProjectId || !selectedDiscussionId || !discussionMessage.trim()) return;
+    if (!selectedProjectId || !selectedDiscussionId || !discussionMessage.trim() || researchCodexBusy) return;
     setStatus("Asking Codex about research discussion");
-    await request(`/api/research/discussions/${selectedDiscussionId}/codex`, {
-      method: "POST",
-      body: JSON.stringify({
-        content: discussionMessage.trim(),
-        system_prompt: codexSystemPrompt
-      })
-    });
-    setDiscussionMessage("");
-    await refreshResearch(selectedProjectId, selectedDiscussionId);
-    setStatus("Codex discussion answer saved");
+    setResearchCodexBusy(true);
+    try {
+      await request(`/api/research/discussions/${selectedDiscussionId}/codex`, {
+        method: "POST",
+        body: JSON.stringify({
+          content: discussionMessage.trim(),
+          system_prompt: codexSystemPrompt
+        })
+      });
+      setDiscussionMessage("");
+      await refreshResearch(selectedProjectId, selectedDiscussionId);
+      setStatus("Codex discussion answer saved");
+    } finally {
+      setResearchCodexBusy(false);
+    }
   }
 
   async function createGroundingSnapshot() {
@@ -1633,12 +1645,17 @@ function App() {
                       <button
                         className="primary"
                         type="button"
-                        disabled={!selectedDiscussionId || !discussionMessage.trim() || !codexStatus?.codex_chat_available}
+                        disabled={
+                          researchCodexBusy ||
+                          !selectedDiscussionId ||
+                          !discussionMessage.trim() ||
+                          !codexStatus?.codex_chat_available
+                        }
                         onClick={() =>
                           askResearchDiscussionCodex().catch((err) => setError(String(err.message || err)))
                         }
                       >
-                        <Sparkles size={15} /> Ask Codex
+                        <Sparkles size={15} /> {researchCodexBusy ? "Asking" : "Ask Codex"}
                       </button>
                     </div>
                     <label className="field-label">
