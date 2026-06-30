@@ -38,6 +38,15 @@ Error authenticating: IneligibleTierError: This client is no longer supported fo
 
 This lane produced no code findings. It is recorded as blocked by external authentication and product-tier constraints, not by repository state.
 
+## Post-Merge Retry
+
+After the user completed `agy` OAuth login, the `agy` lane was rerun against the
+final merged PR10 diff (`30694ca..e4bfb4c`). The retry completed successfully
+with verdict APPROVE. The only finding was the already-deferred LOW issue that
+Codex `RuntimeError` maps to HTTP 400 consistently with the existing paper-chat
+endpoint. The successful retry is archived in
+`docs/PR_REVIEW_2026-06-30_PR10_AGY.md`.
+
 ## Other Review Lanes
 
 - Claude completed and approved with findings.
