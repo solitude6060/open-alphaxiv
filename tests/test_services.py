@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -15,7 +16,7 @@ from app.services import (
     extract_pdf_text_layers,
     normalize_arxiv_id,
 )
-from app.store import Store
+from app.store import Store, dumps
 
 
 def minimal_pdf_bytes() -> bytes:
@@ -91,13 +92,13 @@ def deterministic_pdf_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
             "Machine translation experiments compare BLEU scores against recurrent baselines."
         )
 
-    def page_images(pdf_path: Path, output_dir: Path, max_pages: int = 12) -> list[Path]:
+    def page_images(pdf_path: Path, output_dir: Path, max_pages: int = 80) -> list[Path]:
         output_dir.mkdir(parents=True, exist_ok=True)
         page = output_dir / "page-001.png"
         page.write_bytes(b"png")
         return [page]
 
-    def text_layers(pdf_path: Path, max_pages: int = 12, timeout: float = 30.0) -> list[dict[str, object]]:
+    def text_layers(pdf_path: Path, max_pages: int = 80, timeout: float = 30.0) -> list[dict[str, object]]:
         return [
             {
                 "page_number": 1,
@@ -172,8 +173,193 @@ def test_ingest_paper_creates_ready_chunks_and_graph(service: PaperService) -> N
     text_layer = service.paper_page_text_layer(paper["id"], 1)
     assert text_layer["words"][0]["text"] == "Attention"
     graph = service.literature_graph(paper["id"])
-    assert len(graph["nodes"]) >= 20
+    assert graph["nodes"] == []
+    assert graph["edges"] == []
+    assert graph["status"] == "empty"
+    assert "Semantic Scholar" in graph["status_reason"]
+    mvp_nodes = service.store.query_all(
+        "SELECT * FROM literature_nodes WHERE seed_paper_id = ? AND external_source = 'mvp1-local'",
+        (paper["id"],),
+    )
+    assert mvp_nodes == []
+    entities = service.store.query_all("SELECT * FROM entity_nodes WHERE paper_id = ?", (paper["id"],))
+    assert entities
+
+
+def test_build_literature_graph_uses_semantic_scholar_fixture(
+    service: PaperService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = json.loads(
+        (Path(__file__).parent / "fixtures" / "s2_attention.json").read_text(encoding="utf-8")
+    )
+    from app.connectors.semantic_scholar import build_graph_from_s2
+
+    monkeypatch.setattr(
+        "app.services.fetch_paper_neighborhood",
+        lambda arxiv_id, api_key="": build_graph_from_s2(
+            fixture["seed"], fixture["references"], fixture["citations"]
+        ),
+    )
+    paper = service.ingest_paper("https://arxiv.org/abs/1706.03762")
+    graph = service.build_literature_graph(paper["id"])
+    titles = {node["title"] for node in graph["nodes"]}
+    assert "Prior work 1:" not in " ".join(titles)
+    assert "Attention Is All You Need" in titles
+    assert "BERT: Pre-training of Deep Bidirectional Transformers" in titles
+    assert graph["attribution"] == "Data from Semantic Scholar"
+    assert graph["status"] == "ok"
     assert graph["edges"]
+
+
+def test_build_literature_graph_records_failure_without_fake_nodes(
+    service: PaperService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(arxiv_id: str, api_key: str = "") -> dict[str, object]:
+        raise RuntimeError("Semantic Scholar unavailable")
+
+    monkeypatch.setattr("app.services.fetch_paper_neighborhood", boom)
+    paper = service.ingest_paper("https://arxiv.org/abs/1706.03762")
+    graph = service.build_literature_graph(paper["id"])
+    assert graph["nodes"] == []
+    assert graph["status"] == "error"
+    assert "unavailable" in graph["status_reason"]
+    assert service.store.query_all(
+        "SELECT * FROM literature_nodes WHERE seed_paper_id = ?",
+        (paper["id"],),
+    ) == []
+
+
+def _insert_mvp1_local_graph(service: PaperService, paper_id: int) -> None:
+    node_id = service.store.execute(
+        """
+        INSERT INTO literature_nodes
+            (seed_paper_id, external_source, external_id, title, authors_json,
+             year, venue, abstract, citation_count, group_name, url)
+        VALUES (?, 'mvp1-local', ?, ?, ?, 2024, 'Local MVP graph', ?, 80, 'prior', ?)
+        """,
+        (
+            paper_id,
+            f"mvp1-{paper_id}-1",
+            "Prior work 1: retrieval for leftover-upgrade",
+            dumps(["Open AlphaXiv Local"]),
+            "Generated prior node",
+            "https://arxiv.org/abs/1706.03762",
+        ),
+    )
+    service.store.execute(
+        """
+        INSERT INTO literature_edges
+            (seed_paper_id, source_node_id, target_node_id, edge_type, score, explanation)
+        VALUES (?, ?, ?, 'cites', 1.0, 'MVP1 leftover edge')
+        """,
+        (paper_id, node_id, node_id),
+    )
+
+
+def test_literature_graph_hides_leftover_mvp1_local_nodes(service: PaperService) -> None:
+    paper = service.ingest_paper("https://arxiv.org/abs/1706.03762")
+    _insert_mvp1_local_graph(service, paper["id"])
+    graph = service.literature_graph(paper["id"])
+    assert graph["nodes"] == []
+    assert graph["edges"] == []
+    assert graph["status"] == "empty"
+    assert graph["attribution"] == ""
+    assert "Prior work 1:" not in " ".join(node["title"] for node in graph["nodes"])
+    leftover = service.store.query_all(
+        "SELECT * FROM literature_nodes WHERE seed_paper_id = ? AND external_source = 'mvp1-local'",
+        (paper["id"],),
+    )
+    assert leftover == []
+
+
+def test_failed_rebuild_keeps_previous_semantic_scholar_nodes(
+    service: PaperService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = json.loads(
+        (Path(__file__).parent / "fixtures" / "s2_attention.json").read_text(encoding="utf-8")
+    )
+    from app.connectors.semantic_scholar import build_graph_from_s2
+
+    monkeypatch.setattr(
+        "app.services.fetch_paper_neighborhood",
+        lambda arxiv_id, api_key="": build_graph_from_s2(
+            fixture["seed"], fixture["references"], fixture["citations"]
+        ),
+    )
+    paper = service.ingest_paper("https://arxiv.org/abs/1706.03762")
+    service.build_literature_graph(paper["id"])
+    monkeypatch.setattr(
+        "app.services.fetch_paper_neighborhood",
+        lambda arxiv_id, api_key="": (_ for _ in ()).throw(RuntimeError("Semantic Scholar unavailable")),
+    )
+    graph = service.build_literature_graph(paper["id"])
+    titles = {node["title"] for node in graph["nodes"]}
+    assert "Attention Is All You Need" in titles
+    assert graph["status"] == "error"
+    assert graph["attribution"] == "Data from Semantic Scholar"
+    assert "unavailable" in graph["status_reason"]
+
+
+def test_failed_s2_build_does_not_keep_mvp1_local_nodes(
+    service: PaperService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.services.fetch_paper_neighborhood",
+        lambda arxiv_id, api_key="": (_ for _ in ()).throw(RuntimeError("Semantic Scholar unavailable")),
+    )
+    paper = service.ingest_paper("https://arxiv.org/abs/1706.03762")
+    _insert_mvp1_local_graph(service, paper["id"])
+    graph = service.build_literature_graph(paper["id"])
+    assert graph["nodes"] == []
+    assert graph["status"] == "error"
+    assert graph["attribution"] == ""
+    assert "unavailable" in graph["status_reason"]
+    assert service.store.query_all(
+        "SELECT * FROM literature_nodes WHERE seed_paper_id = ?",
+        (paper["id"],),
+    ) == []
+
+
+def test_refresh_feed_stores_metadata_and_skips_inside_interval(
+    service: PaperService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_list(category: str, max_results: int = 25) -> list[dict[str, object]]:
+        calls.append(category)
+        return [
+            {
+                "arxiv_id": "2201.08239",
+                "title": "Attention Is All You Need",
+                "abstract": "Transformer abstract.",
+                "authors": ["Ashish Vaswani"],
+                "published_at": "2017-06-12T00:00:00Z",
+                "landing_url": "https://arxiv.org/abs/2201.08239",
+                "pdf_url": "https://arxiv.org/pdf/2201.08239",
+            }
+        ]
+
+    monkeypatch.setattr("app.services.list_category", fake_list)
+    first = service.refresh_feed("cs.LG")
+    second = service.refresh_feed("cs.LG")
+    forced = service.refresh_feed("cs.LG", force=True)
+    assert first["skipped"] is False
+    assert second["skipped"] is True
+    assert forced["skipped"] is False
+    assert calls == ["cs.LG", "cs.LG"]
+    assert first["items"][0]["landing_url"] == "https://arxiv.org/abs/2201.08239"
+    assert not list(service.storage_dir.rglob("*.pdf"))
+
+
+def test_pdf_defaults_cover_long_papers() -> None:
+    source = (Path(__file__).resolve().parents[1] / "app" / "services.py").read_text(encoding="utf-8")
+    assert "def render_pdf_page_images(pdf_path: Path, output_dir: Path, max_pages: int = 80)" in source
+    assert "def extract_pdf_text_layers(pdf_path: Path, max_pages: int = 80, timeout: float = 30.0)" in source
 
 
 def test_ingest_uploaded_pdf_creates_ready_upload_paper(service: PaperService) -> None:
@@ -288,6 +474,50 @@ def test_provider_healthcheck_and_redaction(service: PaperService) -> None:
     assert result["status"] == "ok"
 
 
+def test_openai_compatible_healthcheck_calls_models_endpoint(
+    service: PaperService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        status_code = 200
+        text = '{"data":[]}'
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"data": [{"id": "gpt-4.1"}]}
+
+    def fake_request(method: str, url: str, **kwargs: object) -> FakeResponse:
+        captured["method"] = method
+        captured["url"] = url
+        captured["headers"] = kwargs.get("headers")
+        return FakeResponse()
+
+    monkeypatch.setattr("app.agents.openai_compatible.request_json", fake_request)
+    provider = service.create_provider(
+        {
+            "name": "openai",
+            "provider_type": "openai_compatible",
+            "base_url": "https://api.openai.com/v1",
+            "model": "gpt-4.1",
+            "api_key": "sk-secret",
+        }
+    )
+    listed = service.list_providers()
+    assert listed[0]["has_api_key"] is True
+    assert "api_key" not in listed[0]
+    result = service.healthcheck_provider(provider["id"])
+    assert result["status"] == "ok"
+    assert captured["method"] == "GET"
+    assert captured["url"] == "https://api.openai.com/v1/models"
+    headers = captured["headers"]
+    assert isinstance(headers, dict)
+    assert headers["Authorization"] == "Bearer sk-secret"
+
+
 def test_chat_answer_has_citations_and_retrieval(service: PaperService) -> None:
     paper = service.ingest_paper("2201.08239")
     answer = service.ask(paper["id"], "What is the paper about?")
@@ -324,6 +554,35 @@ def test_chat_session_persists_conversation_messages(service: PaperService) -> N
     assert loaded["messages"][0]["content"] == "What is the paper about?"
 
 
+def test_chat_can_use_claude_cli_answer_mode(service: PaperService, monkeypatch: pytest.MonkeyPatch) -> None:
+    paper = service.ingest_paper("2201.08239")
+
+    def fake_claude(prompt: str, options: dict[str, object]) -> dict[str, object]:
+        assert "Attention" in prompt or "attention" in prompt.lower() or "paper" in prompt.lower()
+        assert options.get("enabled") is True
+        return {
+            "ok": True,
+            "text": "claude paper answer",
+            "adapter": "claude_cli",
+            "binary_path": "/bin/claude",
+            "latency_ms": 1,
+            "exit_code": 0,
+            "stderr_preview": "",
+            "model": "claude-code-local-agent",
+        }
+
+    monkeypatch.setattr("app.agents.claude_cli.run_claude_print", fake_claude)
+    answer = service.ask(
+        paper["id"],
+        "Explain the contribution",
+        answer_mode="claude_cli",
+        claude_options={"enabled": True, "cli_path": "claude", "timeout_seconds": 5},
+    )
+    assert answer["answer"] == "claude paper answer"
+    assert answer["retrieval"]["answer_mode"] == "claude_cli"
+    assert answer["retrieval"]["provider"] == "claude_cli"
+
+
 def test_chat_can_use_codex_answer_mode(service: PaperService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     paper = service.ingest_paper("2201.08239")
     captured: dict[str, object] = {}
@@ -333,9 +592,9 @@ def test_chat_can_use_codex_answer_mode(service: PaperService, tmp_path: Path, m
         captured["kwargs"] = kwargs
         return SimpleNamespace(returncode=0, stdout="Codex answer [chunk:1]", stderr="progress")
 
-    monkeypatch.setattr("app.services.resolve_executable", lambda path: "/usr/local/bin/codex")
-    monkeypatch.setattr("app.services.codex_credentials_available", lambda options: True)
-    monkeypatch.setattr("app.services.subprocess.run", fake_run)
+    monkeypatch.setattr("app.agents.codex.resolve_executable", lambda path: "/usr/local/bin/codex")
+    monkeypatch.setattr("app.agents.codex.codex_credentials_available", lambda options: True)
+    monkeypatch.setattr("app.agents.codex.subprocess.run", fake_run)
 
     answer = service.ask(
         paper["id"],
@@ -387,9 +646,9 @@ def test_codex_answer_receives_history_and_whole_paper_scope(
         captured["prompt"] = command[-1]
         return SimpleNamespace(returncode=0, stdout="Codex follow-up answer", stderr="")
 
-    monkeypatch.setattr("app.services.resolve_executable", lambda path: "/usr/local/bin/codex")
-    monkeypatch.setattr("app.services.codex_credentials_available", lambda options: True)
-    monkeypatch.setattr("app.services.subprocess.run", fake_run)
+    monkeypatch.setattr("app.agents.codex.resolve_executable", lambda path: "/usr/local/bin/codex")
+    monkeypatch.setattr("app.agents.codex.codex_credentials_available", lambda options: True)
+    monkeypatch.setattr("app.agents.codex.subprocess.run", fake_run)
 
     answer = service.ask(
         paper["id"],
@@ -448,9 +707,9 @@ def test_codex_timeout_raises_runtime_error(
     def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
         raise subprocess.TimeoutExpired(cmd=command, timeout=5)
 
-    monkeypatch.setattr("app.services.resolve_executable", lambda path: "/usr/local/bin/codex")
-    monkeypatch.setattr("app.services.codex_credentials_available", lambda options: True)
-    monkeypatch.setattr("app.services.subprocess.run", fake_run)
+    monkeypatch.setattr("app.agents.codex.resolve_executable", lambda path: "/usr/local/bin/codex")
+    monkeypatch.setattr("app.agents.codex.codex_credentials_available", lambda options: True)
+    monkeypatch.setattr("app.agents.codex.subprocess.run", fake_run)
 
     with pytest.raises(RuntimeError, match="timed out after 5 seconds"):
         service.ask(
@@ -471,9 +730,9 @@ def test_codex_nonzero_returncode_raises_runtime_error(
     def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
         return SimpleNamespace(returncode=1, stdout="", stderr="codex auth failed")
 
-    monkeypatch.setattr("app.services.resolve_executable", lambda path: "/usr/local/bin/codex")
-    monkeypatch.setattr("app.services.codex_credentials_available", lambda options: True)
-    monkeypatch.setattr("app.services.subprocess.run", fake_run)
+    monkeypatch.setattr("app.agents.codex.resolve_executable", lambda path: "/usr/local/bin/codex")
+    monkeypatch.setattr("app.agents.codex.codex_credentials_available", lambda options: True)
+    monkeypatch.setattr("app.agents.codex.subprocess.run", fake_run)
 
     with pytest.raises(RuntimeError, match="codex auth failed"):
         service.ask(
@@ -494,9 +753,9 @@ def test_codex_oserror_raises_runtime_error(
     def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
         raise PermissionError("permission denied")
 
-    monkeypatch.setattr("app.services.resolve_executable", lambda path: "/usr/local/bin/codex")
-    monkeypatch.setattr("app.services.codex_credentials_available", lambda options: True)
-    monkeypatch.setattr("app.services.subprocess.run", fake_run)
+    monkeypatch.setattr("app.agents.codex.resolve_executable", lambda path: "/usr/local/bin/codex")
+    monkeypatch.setattr("app.agents.codex.codex_credentials_available", lambda options: True)
+    monkeypatch.setattr("app.agents.codex.subprocess.run", fake_run)
 
     with pytest.raises(RuntimeError, match="could not start: permission denied"):
         service.ask(
@@ -517,9 +776,9 @@ def test_codex_empty_stdout_raises_runtime_error(
     def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr("app.services.resolve_executable", lambda path: "/usr/local/bin/codex")
-    monkeypatch.setattr("app.services.codex_credentials_available", lambda options: True)
-    monkeypatch.setattr("app.services.subprocess.run", fake_run)
+    monkeypatch.setattr("app.agents.codex.resolve_executable", lambda path: "/usr/local/bin/codex")
+    monkeypatch.setattr("app.agents.codex.codex_credentials_available", lambda options: True)
+    monkeypatch.setattr("app.agents.codex.subprocess.run", fake_run)
 
     with pytest.raises(RuntimeError, match="empty answer"):
         service.ask(
@@ -543,9 +802,9 @@ def test_codex_answer_uses_isolated_default_cwd(
         captured["cwd_exists_during_run"] = cwd.exists()
         return SimpleNamespace(returncode=0, stdout="Codex answer [chunk:1]", stderr="")
 
-    monkeypatch.setattr("app.services.resolve_executable", lambda path: "/usr/local/bin/codex")
-    monkeypatch.setattr("app.services.codex_credentials_available", lambda options: True)
-    monkeypatch.setattr("app.services.subprocess.run", fake_run)
+    monkeypatch.setattr("app.agents.codex.resolve_executable", lambda path: "/usr/local/bin/codex")
+    monkeypatch.setattr("app.agents.codex.codex_credentials_available", lambda options: True)
+    monkeypatch.setattr("app.agents.codex.subprocess.run", fake_run)
 
     service.ask(
         paper["id"],
@@ -918,9 +1177,9 @@ def test_research_discussion_codex_turn_persists_grounded_answer(
         captured["kwargs"] = kwargs
         return SimpleNamespace(returncode=0, stdout="Inspect retrieval failures and tokenizer normalization.", stderr="ok")
 
-    monkeypatch.setattr("app.services.resolve_executable", lambda path: "/usr/local/bin/codex")
-    monkeypatch.setattr("app.services.codex_credentials_available", lambda options: True)
-    monkeypatch.setattr("app.services.subprocess.run", fake_run)
+    monkeypatch.setattr("app.agents.codex.resolve_executable", lambda path: "/usr/local/bin/codex")
+    monkeypatch.setattr("app.agents.codex.codex_credentials_available", lambda options: True)
+    monkeypatch.setattr("app.agents.codex.subprocess.run", fake_run)
 
     result = service.ask_research_discussion_codex(
         discussion["id"],
@@ -1000,9 +1259,9 @@ def test_research_discussion_codex_failure_does_not_persist_partial_turn(
     def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
         return SimpleNamespace(returncode=1, stdout="", stderr="codex failed")
 
-    monkeypatch.setattr("app.services.resolve_executable", lambda path: "/usr/local/bin/codex")
-    monkeypatch.setattr("app.services.codex_credentials_available", lambda options: True)
-    monkeypatch.setattr("app.services.subprocess.run", fake_run)
+    monkeypatch.setattr("app.agents.codex.resolve_executable", lambda path: "/usr/local/bin/codex")
+    monkeypatch.setattr("app.agents.codex.codex_credentials_available", lambda options: True)
+    monkeypatch.setattr("app.agents.codex.subprocess.run", fake_run)
 
     with pytest.raises(RuntimeError, match="codex failed"):
         service.ask_research_discussion_codex(

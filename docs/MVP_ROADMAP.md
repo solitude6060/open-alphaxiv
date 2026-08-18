@@ -1,5 +1,9 @@
 # MVP and Roadmap
 
+> **Superseded 2026-08-17.** Historical 2026-06 phase list. Living plan:
+> `docs/ALPHAXIV_RECREATION_PLAN.md`. Postgres, Redis, and Next.js in this
+> file are not implementation requirements.
+
 ## Delivery Strategy
 
 The first implementation should be a local Docker application with a narrow but

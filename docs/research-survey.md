@@ -2,6 +2,10 @@
 
 Survey date: 2026-06-28
 
+**2026-08-17:** Historical. Living survey is `docs/SURVEY_2026-08-17.md`.
+Do not implement Gemini-locked MiniRAG or Copilot OAuth from this file.
+Product scope: `docs/PRODUCT_CONTRACT.md`.
+
 ## Objective
 
 Survey the user-facing functions and implementation-relevant behavior of:

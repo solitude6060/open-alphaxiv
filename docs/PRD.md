@@ -1,5 +1,10 @@
 # Product Requirements Document
 
+> **Superseded 2026-08-17.** Historical 2026-06 requirements. Living contract:
+> `docs/CANONICAL.md` and `docs/PRODUCT_CONTRACT.md`. Non-goals in this file
+> (including "full alphaXiv clone parity") do not constrain the 2026-08
+> recreation plan.
+
 ## Product Name
 
 Working name: Open AlphaXiv Local

@@ -2,7 +2,11 @@
 
 Open AlphaXiv is a local-first research paper workspace for reading arXiv
 papers as selectable PDF pages, asking paper questions, and keeping notes in
-one Docker-deployable app.
+one Docker-deployable app. It is an independent local product, not an official
+alphaXiv service. See [Legal boundary](docs/LEGAL_BOUNDARY.md).
+
+Living documents: [canonical index](docs/CANONICAL.md). Historical 2026-06
+files (`docs/SPEC.md`, `docs/PRD.md`, `docs/MVP_ROADMAP.md`) are archives.
 
 The app is designed for researchers who want a private paper reading surface:
 paste an arXiv URL or upload a local PDF, read the imported PDF in the browser,
@@ -40,7 +44,9 @@ context.
 - Use local Codex through `codex exec` for paper Q&A when the host machine is
   already logged in to the Codex CLI.
 - Bookmark, tag, and export paper notes as Markdown.
-- Explore related, prior, and derivative literature graph views.
+- Explore related, prior, and derivative literature from Semantic Scholar
+  (empty until you build the graph; no generated placeholder papers).
+- Refresh a local arXiv category feed (metadata only until you ingest a paper).
 
 ## Run Locally
 
@@ -49,6 +55,9 @@ Run the full Docker stack:
 ```bash
 docker compose up --build
 ```
+
+The API uses SQLite on the `app-data` volume. Compose does not start
+Postgres or Redis.
 
 Open the app:
 
@@ -67,6 +76,33 @@ Use a different web port when 3100 is already occupied:
 ```bash
 WEB_PORT=3200 docker compose up -d web
 ```
+
+Docker Compose forwards Codex flags only. Claude Code and OpenCode paper
+chat need the host API below, because those CLIs and logins live on the
+machine, not in the image.
+
+## Run on the host
+
+Use this path for Claude Code or OpenCode Ask Paper:
+
+```bash
+export PYTHONPATH=.:.deps
+export OPEN_ALPHAXIV_CLAUDE_ENABLED=true
+export OPEN_ALPHAXIV_OPENCODE_ENABLED=true
+export OPEN_ALPHAXIV_CORS_ORIGIN=http://localhost:3000
+python3 -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+```bash
+cd web
+npm run dev
+```
+
+Open `http://127.0.0.1:3000`. Copy `.env.example` to `.env` to set
+`SEMANTIC_SCHOLAR_API_KEY`. Without a key, Similar-panel builds stay empty
+after Semantic Scholar HTTP 429. Enable Codex with
+`OPEN_ALPHAXIV_CODEX_ENABLED=true` only when the host Codex CLI is inside
+its usage window.
 
 ## Paper Import
 
@@ -182,9 +218,46 @@ Check the Codex Docker mount setup:
 bash scripts/check-codex-docker.sh
 ```
 
+## MCP (localhost)
+
+Bind the API to loopback. Cursor, Claude Code, and Codex can call the local
+library without a second model bill inside this app.
+
+Cursor `mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "open-alphaxiv": {
+      "url": "http://127.0.0.1:8000/mcp"
+    }
+  }
+}
+```
+
+Claude Code:
+
+```bash
+claude mcp add --transport http open-alphaxiv http://127.0.0.1:8000/mcp
+```
+
+Codex CLI:
+
+```bash
+codex mcp add open-alphaxiv --url http://127.0.0.1:8000/mcp
+```
+
+Stdio launcher for clients that want a child process:
+
+```bash
+python -m app.mcp
+```
+
+Tools: `search_arxiv`, `ingest_paper`, `list_library`, `get_paper_text`,
+`query_paper_pages`, `save_note`, `list_notes`. `search_arxiv` only calls
+`export.arxiv.org`.
+
 ## Project Docs
 
-- [Product requirements](docs/PRD.md)
-- [Technical specification](docs/SPEC.md)
-- [Research survey](docs/research-survey.md)
-- [MVP and roadmap](docs/MVP_ROADMAP.md)
+Index: [canonical documents](docs/CANONICAL.md). That file lists living
+contracts, evidence records, and historical 2026-06 archives.
