@@ -155,6 +155,38 @@ class Store:
                     explanation TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS literature_builds (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    seed_paper_id INTEGER NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+                    status TEXT NOT NULL,
+                    status_reason TEXT NOT NULL DEFAULT '',
+                    attribution TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS feed_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    arxiv_id TEXT NOT NULL UNIQUE,
+                    category TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    abstract TEXT NOT NULL DEFAULT '',
+                    authors_json TEXT NOT NULL DEFAULT '[]',
+                    published_at TEXT NOT NULL DEFAULT '',
+                    landing_url TEXT NOT NULL,
+                    pdf_url TEXT NOT NULL DEFAULT '',
+                    ingested_paper_id INTEGER REFERENCES papers(id) ON DELETE SET NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS feed_refresh_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    category TEXT NOT NULL,
+                    refreshed_at TEXT NOT NULL,
+                    item_count INTEGER NOT NULL DEFAULT 0,
+                    skipped INTEGER NOT NULL DEFAULT 0
+                );
+
                 CREATE TABLE IF NOT EXISTS research_projects (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     title TEXT NOT NULL,
@@ -261,6 +293,18 @@ class Store:
                     created_at TEXT NOT NULL,
                     CHECK (note_id IS NOT NULL OR discussion_message_id IS NOT NULL)
                 );
+                """
+            )
+            conn.executescript(
+                """
+                DELETE FROM literature_edges
+                WHERE source_node_id IN (
+                    SELECT id FROM literature_nodes WHERE external_source = 'mvp1-local'
+                )
+                OR target_node_id IN (
+                    SELECT id FROM literature_nodes WHERE external_source = 'mvp1-local'
+                );
+                DELETE FROM literature_nodes WHERE external_source = 'mvp1-local';
                 """
             )
 

@@ -83,6 +83,7 @@ type GraphNode = {
   group: "seed" | "prior" | "derivative" | "related";
   year: number;
   citation_count: number;
+  url?: string;
 };
 
 type GraphEdge = {
@@ -91,6 +92,46 @@ type GraphEdge = {
   target: number;
   edge_type: string;
   score: number;
+};
+
+type LiteratureGraph = {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  status?: string;
+  status_reason?: string;
+  attribution?: string;
+};
+
+type FeedItem = {
+  id: number;
+  arxiv_id: string;
+  title: string;
+  abstract: string;
+  authors: string[];
+  published_at: string;
+  landing_url: string;
+  ingested_paper_id: number | null;
+};
+
+type FeedPayload = {
+  category: string;
+  items: FeedItem[];
+  skipped: boolean;
+  refreshed_at: string;
+};
+
+type AnswerMode = "mock" | "codex" | "claude_cli" | "opencode" | "openai_compatible";
+
+type AgentProbe = {
+  available: boolean;
+  reason: string;
+};
+
+type AgentsStatus = {
+  codex: AgentProbe;
+  claude_cli: AgentProbe;
+  opencode: AgentProbe;
+  openai_compatible: AgentProbe;
 };
 
 type ChatResult = {
@@ -102,7 +143,7 @@ type ChatResult = {
   retrieval: {
     provider: string;
     model: string;
-    answer_mode: "mock" | "codex";
+    answer_mode: AnswerMode;
     context_strategy?: string;
     context_scope?: "selection" | "whole_paper";
     paper_context_chars?: number;
@@ -118,7 +159,7 @@ type ChatMessage = {
   metadata: {
     provider?: string;
     model?: string;
-    answer_mode?: "mock" | "codex";
+    answer_mode?: AnswerMode;
     context_strategy?: string;
     context_scope?: "selection" | "whole_paper";
   };
@@ -322,7 +363,7 @@ function App() {
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadInputKey, setUploadInputKey] = useState(0);
   const [query, setQuery] = useState("What is the core contribution?");
-  const [answerMode, setAnswerMode] = useState<"mock" | "codex">("mock");
+  const [answerMode, setAnswerMode] = useState<AnswerMode>("mock");
   const [codexSystemPrompt, setCodexSystemPrompt] = useState(() => {
     return window.localStorage.getItem(CODEX_SYSTEM_PROMPT_STORAGE_KEY) || "";
   });
@@ -337,9 +378,11 @@ function App() {
   const [activeSessionId, setActiveSessionId] = useState<number | null>(null);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [graphView, setGraphView] = useState("related");
-  const [graph, setGraph] = useState<{ nodes: GraphNode[]; edges: GraphEdge[] } | null>(null);
+  const [graph, setGraph] = useState<LiteratureGraph | null>(null);
+  const [feed, setFeed] = useState<FeedPayload | null>(null);
   const [activeTool, setActiveTool] = useState<"assistant" | "notes" | "similar" | "codex">("assistant");
   const [codexStatus, setCodexStatus] = useState<CodexStatus | null>(null);
+  const [agentsStatus, setAgentsStatus] = useState<AgentsStatus | null>(null);
   const [researchProjects, setResearchProjects] = useState<ResearchProject[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<number | null>(null);
   const [researchQuestions, setResearchQuestions] = useState<ResearchQuestion[]>([]);
@@ -392,9 +435,21 @@ function App() {
     } catch {
       codex = null;
     }
+    let agents: AgentsStatus | null = null;
+    try {
+      agents = await request<AgentsStatus>("/api/agents/status");
+    } catch {
+      agents = null;
+    }
     setProviders(providerRows);
     setPapers(paperRows);
     setCodexStatus(codex);
+    setAgentsStatus(agents);
+    try {
+      setFeed(await request<FeedPayload>("/api/feed"));
+    } catch {
+      setFeed(null);
+    }
     if (!selectedPaperId && paperRows.length > 0) {
       setSelectedPaperId(paperRows[0].id);
     }
@@ -561,7 +616,7 @@ function App() {
     const question = query.trim();
     if (!question) return;
     setError("");
-    setStatus(answerMode === "codex" ? "Asking Codex with paper context" : "Asking local mock model");
+    setStatus(answerMode === "mock" ? "Asking local mock model" : `Asking ${answerMode} with paper context`);
     const result = await request<ChatResult>("/api/chat/messages", {
       method: "POST",
       body: JSON.stringify({
@@ -570,7 +625,7 @@ function App() {
         session_id: activeSessionId,
         selected_text: selectedText,
         selected_image: selectedImage,
-        system_prompt: answerMode === "codex" ? codexSystemPrompt : "",
+        system_prompt: answerMode === "mock" ? "" : codexSystemPrompt,
         answer_mode: answerMode
       })
     });
@@ -622,7 +677,7 @@ function App() {
     setPageTextLayers({});
     const [pageRows, graphData] = await Promise.all([
       request<PaperPage[]>(`/api/papers/${paperId}/pages`),
-      request<{ nodes: GraphNode[]; edges: GraphEdge[] }>(
+      request<LiteratureGraph>(
         `/api/papers/${paperId}/literature-graph?view=${view}`
       )
     ]);
@@ -640,6 +695,35 @@ function App() {
     } catch {
       setPageTextLayers({});
     }
+  }
+
+  async function refreshFeed(force = false) {
+    setError("");
+    const payload = await request<FeedPayload>("/api/feed/refresh", {
+      method: "POST",
+      body: JSON.stringify({ force })
+    });
+    setFeed(payload);
+  }
+
+  async function ingestFeedItem(item: FeedItem) {
+    setError("");
+    const paper = await request<Paper>("/api/papers", {
+      method: "POST",
+      body: JSON.stringify({ source: item.arxiv_id })
+    });
+    await refresh();
+    setSelectedPaperId(paper.id);
+  }
+
+  async function buildLiteratureGraph() {
+    if (!selectedPaper) return;
+    setError("");
+    const graphData = await request<LiteratureGraph>(
+      `/api/papers/${selectedPaper.id}/literature-graph/build`,
+      { method: "POST" }
+    );
+    setGraph(graphData);
   }
 
   async function toggleBookmark() {
@@ -998,6 +1082,39 @@ function App() {
 
       {error ? <div className="error-banner">{error}</div> : null}
 
+      <section className="feed-strip" aria-label="arXiv category feed">
+        <div className="feed-strip-head">
+          <strong>Feed {feed?.category || "cs.LG"}</strong>
+          <button
+            className="quiet-button"
+            type="button"
+            onClick={() => refreshFeed(false).catch((err) => setError(String(err.message || err)))}
+          >
+            Refresh
+          </button>
+        </div>
+        <div className="feed-cards">
+          {(feed?.items || []).slice(0, 8).map((item) => (
+            <article className="feed-card" key={item.arxiv_id}>
+              <strong>{item.title}</strong>
+              <small>{item.arxiv_id}</small>
+              <div className="feed-card-actions">
+                <a href={item.landing_url} target="_blank" rel="noreferrer">
+                  arXiv
+                </a>
+                <button
+                  type="button"
+                  onClick={() => ingestFeedItem(item).catch((err) => setError(String(err.message || err)))}
+                >
+                  {item.ingested_paper_id ? "Open" : "Ingest"}
+                </button>
+              </div>
+            </article>
+          ))}
+          {!feed?.items?.length ? <span className="feed-empty">No stored feed items. Refresh to query export.arxiv.org.</span> : null}
+        </div>
+      </section>
+
       <section className="library-strip">
         <select
           value={selectedPaper?.id || ""}
@@ -1151,7 +1268,17 @@ function App() {
               <section className="tool-section">
                 <div className="tool-heading">
                   <h2><Sparkles size={18} /> Assistant</h2>
-                  <span>{answerMode === "codex" ? "full text" : "local mock"}</span>
+                  <span>
+                    {answerMode === "mock"
+                      ? "local mock"
+                      : answerMode === "codex"
+                        ? "full text"
+                        : answerMode === "claude_cli"
+                          ? "Claude Code"
+                          : answerMode === "opencode"
+                            ? "OpenCode"
+                            : "HTTP model"}
+                  </span>
                 </div>
                 <div className="mode-switch" aria-label="Answer mode">
                   <button
@@ -1163,14 +1290,37 @@ function App() {
                   <button
                     className={answerMode === "codex" ? "active" : ""}
                     onClick={() => setAnswerMode("codex")}
-                    disabled={!codexStatus?.codex_chat_available}
+                    disabled={!agentsStatus?.codex.available && !codexStatus?.codex_chat_available}
                   >
                     Codex
                   </button>
+                  <button
+                    className={answerMode === "claude_cli" ? "active" : ""}
+                    onClick={() => setAnswerMode("claude_cli")}
+                    disabled={!agentsStatus?.claude_cli.available}
+                  >
+                    Claude
+                  </button>
+                  <button
+                    className={answerMode === "opencode" ? "active" : ""}
+                    onClick={() => setAnswerMode("opencode")}
+                    disabled={!agentsStatus?.opencode.available}
+                  >
+                    OpenCode
+                  </button>
+                  <button
+                    className={answerMode === "openai_compatible" ? "active" : ""}
+                    onClick={() => setAnswerMode("openai_compatible")}
+                    disabled={!agentsStatus?.openai_compatible.available}
+                  >
+                    HTTP
+                  </button>
                 </div>
-                {answerMode === "codex" && !codexStatus?.codex_chat_available ? (
+                {answerMode !== "mock" && !(answerMode === "codex" ? agentsStatus?.codex.available || codexStatus?.codex_chat_available : agentsStatus?.[answerMode]?.available) ? (
                   <p className="codex-boundary">
-                    Enable the local Codex agent in the backend before using Codex for paper chat.
+                    {answerMode === "codex"
+                      ? agentsStatus?.codex.reason || "Enable the local Codex agent in the backend before using Codex for paper chat."
+                      : agentsStatus?.[answerMode]?.reason}
                   </p>
                 ) : null}
                 <div className="conversation-controls">
@@ -1195,7 +1345,7 @@ function App() {
                     <Plus size={15} />
                   </button>
                 </div>
-                {answerMode === "codex" && codexSystemPrompt.trim() ? (
+                {answerMode !== "mock" && codexSystemPrompt.trim() ? (
                   <div className="prompt-applied">
                     <KeyRound size={15} />
                     <span>Custom Codex prompt applied</span>
@@ -1754,11 +1904,24 @@ function App() {
                     ))}
                   </div>
                 </div>
+                {graph?.attribution ? <p className="graph-attribution">{graph.attribution}</p> : null}
+                {graph?.status_reason ? <p className="graph-status">{graph.status_reason}</p> : null}
+                <button
+                  className="quiet-button"
+                  type="button"
+                  onClick={() => buildLiteratureGraph().catch((err) => setError(String(err.message || err)))}
+                >
+                  Build from Semantic Scholar
+                </button>
                 <div className="related-list">
                   {graphNodes.map((node) => (
                     <article key={node.id} className={`node-row ${node.group}`}>
                       <strong>{node.group}</strong>
-                      <span>{node.title}</span>
+                      {node.url ? (
+                        <a href={node.url} target="_blank" rel="noreferrer">{node.title}</a>
+                      ) : (
+                        <span>{node.title}</span>
+                      )}
                       <small>{node.year} · {node.citation_count} citations</small>
                     </article>
                   ))}
@@ -2141,8 +2304,15 @@ function LoginPage() {
   );
 }
 
-function Graph({ graph }: { graph: { nodes: GraphNode[]; edges: GraphEdge[] } | null }) {
+function Graph({ graph }: { graph: LiteratureGraph | null }) {
   if (!graph) return <div className="graph-empty">No graph loaded.</div>;
+  if (!graph.nodes.length) {
+    return (
+      <div className="graph-empty">
+        {graph.status_reason || "Literature graph has not been built from Semantic Scholar."}
+      </div>
+    );
+  }
   const nodes = graph.nodes.slice(0, 28);
   const centerX = 360;
   const centerY = 230;

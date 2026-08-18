@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import math
-import os
 import re
 import shutil
 import sqlite3
@@ -13,15 +12,29 @@ import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from .agents import claude_cli, opencode as opencode_agent
+from .agents.codex import (
+    _prepare_codex_exec,
+    _run_codex_exec_prompt,
+    codex_credentials_available,
+    resolve_executable,
+)
+from .agents.openai_compatible import chat_completions
+from .agents.openai_compatible import healthcheck as openai_compatible_healthcheck
+from .config import get_settings
+from .connectors.arxiv import fetch_by_id, list_category
+from .connectors.semantic_scholar import S2_ATTRIBUTION, fetch_paper_neighborhood
 from .store import Store, dumps, loads, utcnow
 
 
 ARXIV_RE = re.compile(r"(?P<id>\d{4}\.\d{4,5})(v\d+)?")
 WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_\-]{2,}")
+ALLOWED_ANSWER_MODES = ("mock", "codex", "claude_cli", "opencode", "openai_compatible")
 STOPWORDS = {
     "the",
     "and",
@@ -96,24 +109,22 @@ def fetch_binary(url: str, timeout: float = 20.0, max_bytes: int = 50_000_000) -
 
 
 def arxiv_metadata(arxiv_id: str) -> dict[str, Any]:
-    feed = fetch_text(f"https://export.arxiv.org/api/query?id_list={arxiv_id}")
-    if not feed:
+    try:
+        row = fetch_by_id(arxiv_id)
+    except Exception:
+        row = None
+    if not row:
         return fallback_metadata(arxiv_id)
-    entry_match = re.search(r"<entry>(.*?)</entry>", feed, re.S)
-    entry = entry_match.group(1) if entry_match else feed
-    title = _xml_text(entry, "title")
-    summary = _xml_text(entry, "summary")
-    authors = re.findall(r"<author>\s*<name>(.*?)</name>\s*</author>", entry, re.S)
-    published = _xml_text(entry, "published")
+    title = row.get("title") or ""
     if not title or title.lower() == "arxiv query:":
         return fallback_metadata(arxiv_id)
     return {
         "title": clean_ws(title),
-        "abstract": clean_ws(summary) or f"arXiv paper {arxiv_id}",
-        "authors": [clean_ws(author) for author in authors] or ["Unknown"],
-        "published_at": published,
-        "pdf_url": f"https://arxiv.org/pdf/{arxiv_id}",
-        "landing_url": f"https://arxiv.org/abs/{arxiv_id}",
+        "abstract": clean_ws(row.get("abstract") or "") or f"arXiv paper {arxiv_id}",
+        "authors": [clean_ws(author) for author in (row.get("authors") or [])] or ["Unknown"],
+        "published_at": row.get("published_at") or "",
+        "pdf_url": row.get("pdf_url") or f"https://arxiv.org/pdf/{arxiv_id}",
+        "landing_url": row.get("landing_url") or f"https://arxiv.org/abs/{arxiv_id}",
     }
 
 
@@ -276,7 +287,7 @@ def extract_pdf_text(pdf_path: Path, timeout: float = 30.0) -> str:
     return clean_extracted_text(result.stdout)
 
 
-def render_pdf_page_images(pdf_path: Path, output_dir: Path, max_pages: int = 12) -> list[Path]:
+def render_pdf_page_images(pdf_path: Path, output_dir: Path, max_pages: int = 80) -> list[Path]:
     pdftoppm = shutil.which("pdftoppm")
     if not pdftoppm:
         return []
@@ -313,7 +324,7 @@ def render_pdf_page_images(pdf_path: Path, output_dir: Path, max_pages: int = 12
     return normalized
 
 
-def extract_pdf_text_layers(pdf_path: Path, max_pages: int = 12, timeout: float = 30.0) -> list[dict[str, Any]]:
+def extract_pdf_text_layers(pdf_path: Path, max_pages: int = 80, timeout: float = 30.0) -> list[dict[str, Any]]:
     pdftotext = shutil.which("pdftotext")
     if not pdftotext:
         return []
@@ -498,9 +509,18 @@ class PaperService:
             raise KeyError("provider not found")
         status = "ok"
         reason = "mock provider is always available"
-        if row["provider_type"] != "mock" and not row["base_url"]:
+        if row["provider_type"] == "openai_compatible":
+            status, reason = openai_compatible_healthcheck(
+                str(row["base_url"] or ""),
+                str(row["api_key"] or ""),
+                str(row["model"] or ""),
+            )
+        elif row["provider_type"] != "mock" and not row["base_url"]:
             status = "failed"
             reason = "base_url is required for non-mock providers"
+        elif row["provider_type"] not in {"mock", "openai_compatible"}:
+            status = "failed"
+            reason = f"unsupported provider_type: {row['provider_type']}"
         now = utcnow()
         self.store.execute(
             "UPDATE providers SET health_status = ?, last_checked_at = ?, updated_at = ? WHERE id = ?",
@@ -508,13 +528,43 @@ class PaperService:
         )
         return {"provider_id": provider_id, "status": status, "reason": reason, "checked_at": now}
 
+    def require_openai_compatible_provider(self) -> dict[str, Any]:
+        row = self.store.query_one(
+            """
+            SELECT * FROM providers
+            WHERE provider_type = 'openai_compatible' AND is_default = 1
+            ORDER BY id DESC
+            """
+        )
+        if not row:
+            row = self.store.query_one(
+                """
+                SELECT * FROM providers
+                WHERE provider_type = 'openai_compatible'
+                ORDER BY id DESC
+                """
+            )
+        if not row or not row["base_url"]:
+            raise ValueError(
+                "OpenAI-compatible paper chat needs a provider with a base_url. "
+                "Create one under Providers, then run healthcheck."
+            )
+        if row["health_status"] == "failed":
+            raise ValueError(
+                "OpenAI-compatible provider healthcheck failed. "
+                "Fix base_url or API key and re-run healthcheck."
+            )
+        return dict(row)
+
     def ingest_paper(self, source: str) -> dict[str, Any]:
         arxiv_id = normalize_arxiv_id(source)
         existing = self.store.query_one(
             "SELECT id FROM papers WHERE source_type = 'arxiv' AND source_id = ?", (arxiv_id,)
         )
         if existing:
-            return self.get_paper(existing["id"])
+            paper = self.get_paper(existing["id"])
+            self._mark_feed_item_ingested(arxiv_id, paper["id"])
+            return paper
 
         meta = arxiv_metadata(arxiv_id)
         now = utcnow()
@@ -550,6 +600,7 @@ class PaperService:
             pdf_metadata={"source": meta["pdf_url"]},
             now=now,
         )
+        self._mark_feed_item_ingested(arxiv_id, paper_id)
         return self.get_paper(paper_id)
 
     def ingest_uploaded_pdf(self, filename: str, pdf_bytes: bytes, title: str = "") -> dict[str, Any]:
@@ -728,7 +779,6 @@ class PaperService:
                 ),
             )
         self._build_paper_graph(paper_id, markdown)
-        self.build_literature_graph(paper_id)
         self.store.execute(
             "UPDATE papers SET status = 'ready', status_reason = '', updated_at = ? WHERE id = ?",
             (utcnow(), paper_id),
@@ -782,6 +832,128 @@ class PaperService:
         else:
             rows = self.store.query_all("SELECT * FROM papers ORDER BY id DESC")
         return [self._with_asset_counts(paper_row(row)) for row in rows]
+
+    def default_feed_category(self) -> str:
+        raw = get_settings().arxiv_categories
+        first = (raw.split(",")[0] if raw else "").strip()
+        return first or "cs.LG"
+
+    def _mark_feed_item_ingested(self, arxiv_id: str, paper_id: int) -> None:
+        self.store.execute(
+            "UPDATE feed_items SET ingested_paper_id = ?, updated_at = ? WHERE arxiv_id = ?",
+            (paper_id, utcnow(), arxiv_id),
+        )
+
+    def _feed_item_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "arxiv_id": row["arxiv_id"],
+            "category": row["category"],
+            "title": row["title"],
+            "abstract": row["abstract"],
+            "authors": loads(row["authors_json"], []),
+            "published_at": row["published_at"],
+            "landing_url": row["landing_url"],
+            "pdf_url": row["pdf_url"],
+            "ingested_paper_id": row["ingested_paper_id"],
+        }
+
+    def list_feed(self, category: str = "") -> dict[str, Any]:
+        cat = (category or self.default_feed_category()).strip() or self.default_feed_category()
+        last = self.store.query_one(
+            "SELECT * FROM feed_refresh_log WHERE category = ? ORDER BY id DESC LIMIT 1",
+            (cat,),
+        )
+        items = [
+            self._feed_item_row(row)
+            for row in self.store.query_all(
+                "SELECT * FROM feed_items WHERE category = ? ORDER BY published_at DESC, id DESC",
+                (cat,),
+            )
+        ]
+        return {
+            "category": cat,
+            "items": items,
+            "skipped": bool(last and last.get("skipped")),
+            "refreshed_at": last["refreshed_at"] if last else "",
+            "item_count": len(items),
+        }
+
+    def refresh_feed(self, category: str = "", force: bool = False) -> dict[str, Any]:
+        cat = (category or self.default_feed_category()).strip() or self.default_feed_category()
+        last = self.store.query_one(
+            "SELECT * FROM feed_refresh_log WHERE category = ? ORDER BY id DESC LIMIT 1",
+            (cat,),
+        )
+        min_interval = max(0, int(get_settings().feed_min_interval_seconds or 900))
+        if last and not force:
+            try:
+                elapsed = datetime.fromisoformat(utcnow()) - datetime.fromisoformat(last["refreshed_at"])
+                if elapsed.total_seconds() < min_interval:
+                    payload = self.list_feed(cat)
+                    payload["skipped"] = True
+                    return payload
+            except ValueError:
+                pass
+        rows = list_category(cat)
+        now = utcnow()
+        for row in rows:
+            existing = self.store.query_one(
+                "SELECT id, ingested_paper_id FROM feed_items WHERE arxiv_id = ?",
+                (row["arxiv_id"],),
+            )
+            if existing:
+                self.store.execute(
+                    """
+                    UPDATE feed_items
+                    SET category = ?, title = ?, abstract = ?, authors_json = ?,
+                        published_at = ?, landing_url = ?, pdf_url = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        cat,
+                        row["title"],
+                        row.get("abstract") or "",
+                        dumps(row.get("authors") or []),
+                        row.get("published_at") or "",
+                        row["landing_url"],
+                        row.get("pdf_url") or "",
+                        now,
+                        existing["id"],
+                    ),
+                )
+            else:
+                self.store.execute(
+                    """
+                    INSERT INTO feed_items
+                        (arxiv_id, category, title, abstract, authors_json, published_at,
+                         landing_url, pdf_url, ingested_paper_id, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                    """,
+                    (
+                        row["arxiv_id"],
+                        cat,
+                        row["title"],
+                        row.get("abstract") or "",
+                        dumps(row.get("authors") or []),
+                        row.get("published_at") or "",
+                        row["landing_url"],
+                        row.get("pdf_url") or "",
+                        now,
+                        now,
+                    ),
+                )
+        self.store.execute(
+            """
+            INSERT INTO feed_refresh_log (category, refreshed_at, item_count, skipped)
+            VALUES (?, ?, ?, 0)
+            """,
+            (cat, now, len(rows)),
+        )
+        payload = self.list_feed(cat)
+        payload["skipped"] = False
+        payload["refreshed_at"] = now
+        return payload
 
     def get_paper(self, paper_id: int) -> dict[str, Any]:
         row = self.store.query_one("SELECT * FROM papers WHERE id = ?", (paper_id,))
@@ -890,6 +1062,60 @@ class PaperService:
         except (OSError, ValueError):
             return {"paper_id": paper_id, "pages": []}
         return {"paper_id": paper_id, "pages": payload.get("pages", [])}
+
+    def query_paper_pages(
+        self,
+        paper_id: int,
+        questions: list[str] | str,
+        limit: int = 2,
+    ) -> list[dict[str, Any]]:
+        self.get_paper(paper_id)
+        if isinstance(questions, str):
+            question_list = [questions]
+        else:
+            question_list = [str(item) for item in (questions or []) if str(item).strip()]
+        if not question_list:
+            raise ValueError("questions is required")
+        cap = max(1, min(int(limit or 2), 8))
+        layers = self.paper_text_layers(paper_id).get("pages") or []
+        page_docs: list[dict[str, Any]] = []
+        for page in layers:
+            words = page.get("words") or []
+            text = " ".join(str(word.get("text") or "") for word in words if isinstance(word, dict))
+            if text.strip():
+                page_docs.append(
+                    {
+                        "page_number": int(page.get("page_number") or 0),
+                        "text": text,
+                    }
+                )
+        if not page_docs:
+            for chunk in self.chunks(paper_id):
+                page_docs.append(
+                    {
+                        "page_number": int(chunk.get("chunk_index") or 0) + 1,
+                        "text": str(chunk.get("text") or ""),
+                    }
+                )
+        results: list[dict[str, Any]] = []
+        for question in question_list:
+            qterms = set(WORD_RE.findall(question.lower()))
+            scored: list[dict[str, Any]] = []
+            for page in page_docs:
+                terms = set(WORD_RE.findall(page["text"].lower()))
+                overlap = len(qterms & terms) if qterms else 0
+                if overlap <= 0:
+                    continue
+                scored.append(
+                    {
+                        "page_number": page["page_number"],
+                        "score": overlap,
+                        "excerpt": page["text"][:500],
+                    }
+                )
+            scored.sort(key=lambda item: item["score"], reverse=True)
+            results.append({"question": question, "pages": scored[:cap]})
+        return results
 
     def _page_text_layers_artifact(self, paper_id: int) -> dict[str, Any] | None:
         rows = self.store.query_all(
@@ -1054,6 +1280,8 @@ class PaperService:
         system_prompt: str = "",
         answer_mode: str = "mock",
         codex_options: dict[str, Any] | None = None,
+        claude_options: dict[str, Any] | None = None,
+        opencode_options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if session_id is None:
             session_id = self.create_chat_session(paper_id)["id"]
@@ -1061,6 +1289,10 @@ class PaperService:
             session = self.get_chat_session(session_id)
             if session["paper_id"] != paper_id:
                 raise ValueError("chat session does not belong to this paper")
+        if answer_mode not in ALLOWED_ANSWER_MODES:
+            raise ValueError(
+                "answer_mode must be 'mock', 'codex', 'claude_cli', 'opencode', or 'openai_compatible'"
+            )
         conversation_history = self.chat_messages(session_id)[-12:]
         selected_text = clean_ws(selected_text)[:1800]
         system_prompt = clean_ws(system_prompt)[:4000]
@@ -1090,12 +1322,65 @@ class PaperService:
             )
             provider = "codex"
             model = run_metadata.get("model") or "codex-local-agent"
+        elif answer_mode in {"claude_cli", "opencode", "openai_compatible"}:
+            paper = self.get_paper(paper_id)
+            paper_context = self.paper_text(paper_id)["text"]
+            file_references = self.paper_file_references(paper_id, paper)
+            prompt = build_codex_paper_prompt(
+                paper,
+                query,
+                paper_context,
+                selected_text,
+                selected_image,
+                system_prompt,
+                conversation_history,
+                file_references,
+            )
+            if answer_mode == "claude_cli":
+                result = claude_cli.run_claude_print(prompt, claude_options or {})
+            elif answer_mode == "opencode":
+                result = opencode_agent.run_opencode(prompt, opencode_options or {})
+            else:
+                provider_row = self.require_openai_compatible_provider()
+                result = {
+                    "ok": True,
+                    "text": chat_completions(
+                        str(provider_row["base_url"]),
+                        str(provider_row["api_key"] or ""),
+                        str(provider_row["model"] or "gpt-4.1"),
+                        [{"role": "user", "content": prompt}],
+                        60.0,
+                    ),
+                    "adapter": "openai_compatible",
+                    "binary_path": "",
+                    "latency_ms": 0,
+                    "exit_code": 0,
+                    "stderr_preview": "",
+                    "model": str(provider_row["model"] or "gpt-4.1"),
+                }
+            answer = result["text"]
+            provider = result["adapter"]
+            model = result["model"]
+            run_metadata = {
+                "context_strategy": "full_text",
+                "context_scope": context_scope,
+                "paper_context_chars": len(paper_context),
+                "system_prompt_chars": len(system_prompt),
+                "conversation_message_count": len(conversation_history),
+                "paper_file_references": file_references,
+                "adapter": result["adapter"],
+                "binary_path": result.get("binary_path") or "",
+                "latency_ms": result.get("latency_ms") or 0,
+                "stderr_preview": result.get("stderr_preview") or "",
+            }
         elif answer_mode == "mock":
             retrieval_query = f"{query}\n\nSelected passage:\n{selected_text}" if selected_text else query
             ranked = self.retrieve(paper_id, retrieval_query)
             answer = mock_answer(query, ranked, selected_text)
         else:
-            raise ValueError("answer_mode must be 'mock' or 'codex'")
+            raise ValueError(
+                "answer_mode must be 'mock', 'codex', 'claude_cli', 'opencode', or 'openai_compatible'"
+            )
         metadata = {
             "provider": provider,
             "model": model,
@@ -1105,7 +1390,7 @@ class PaperService:
             "context_scope": context_scope,
             "selected_text_preview": selected_text[:240],
             "selected_image": selected_image or None,
-            "system_prompt_preview": system_prompt[:240] if answer_mode == "codex" else "",
+            "system_prompt_preview": system_prompt[:240] if answer_mode != "mock" else "",
             "user_message_id": user_message_id,
             **run_metadata,
         }
@@ -1175,52 +1460,56 @@ class PaperService:
 
     def build_literature_graph(self, paper_id: int) -> dict[str, Any]:
         paper = self.get_paper(paper_id)
-        existing = self.store.query_one(
-            "SELECT COUNT(*) AS count FROM literature_nodes WHERE seed_paper_id = ?", (paper_id,)
-        )
-        if existing and existing["count"] >= 20:
+        arxiv_id = str(paper.get("arxiv_id") or "").strip()
+        if not arxiv_id:
+            self._record_literature_build(
+                paper_id,
+                "error",
+                "Semantic Scholar lookup needs an arXiv identifier.",
+                "",
+            )
+            return self.literature_graph(paper_id)
+        try:
+            graph = fetch_paper_neighborhood(
+                arxiv_id,
+                api_key=get_settings().semantic_scholar_api_key,
+            )
+        except Exception as exc:
+            self._record_literature_build(paper_id, "error", str(exc), "")
             return self.literature_graph(paper_id)
         self.store.execute("DELETE FROM literature_edges WHERE seed_paper_id = ?", (paper_id,))
         self.store.execute("DELETE FROM literature_nodes WHERE seed_paper_id = ?", (paper_id,))
-        seed_year = 2024
-        nodes = [
-            ("seed", paper["title"], seed_year, "related", 100, "Local seed paper"),
-        ]
-        topics = [name for name, _ in extract_entities(paper["title"] + " " + paper["abstract"], 12)]
-        if not topics:
-            topics = ["retrieval", "graph", "research"]
-        for idx in range(1, 25):
-            group = "prior" if idx <= 8 else "derivative" if idx <= 16 else "related"
-            year = seed_year - (9 - idx) if group == "prior" else seed_year + (idx - 15) if group == "derivative" else seed_year
-            topic = topics[idx % len(topics)]
-            title = f"{group.title()} work {idx}: {topic} for {paper['arxiv_id'] or paper['source_id']}"
-            nodes.append((f"mvp1-{paper_id}-{idx}", title, year, group, 80 - idx, f"Generated {group} node"))
-        inserted: list[dict[str, Any]] = []
-        for external_id, title, year, group, cites, abstract in nodes:
+        id_map: dict[str, int] = {}
+        for node in graph.get("nodes") or []:
+            external_id = str(node.get("external_id") or "")
+            if not external_id:
+                continue
             node_id = self.store.execute(
                 """
                 INSERT INTO literature_nodes
                     (seed_paper_id, external_source, external_id, title, authors_json,
                      year, venue, abstract, citation_count, group_name, url)
-                VALUES (?, 'mvp1-local', ?, ?, ?, ?, 'Local MVP graph', ?, ?, ?, ?)
+                VALUES (?, 'semantic_scholar', ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     paper_id,
                     external_id,
-                    title,
-                    dumps(["Open AlphaXiv Local"]),
-                    year,
-                    abstract,
-                    cites,
-                    group,
-                    paper["landing_url"],
+                    node.get("title") or "Untitled paper",
+                    dumps(node.get("authors") or []),
+                    int(node.get("year") or 0),
+                    node.get("venue") or "",
+                    node.get("abstract") or "",
+                    int(node.get("citation_count") or 0),
+                    node.get("group") or "related",
+                    node.get("url") or "",
                 ),
             )
-            inserted.append({"id": node_id, "group": group})
-        seed_node = inserted[0]["id"]
-        for idx, node in enumerate(inserted[1:], start=1):
-            edge_type = "cites" if node["group"] == "prior" else "cited_by" if node["group"] == "derivative" else "semantic_similarity"
-            score = round(1.0 - (idx * 0.025), 3)
+            id_map[external_id] = node_id
+        for edge in graph.get("edges") or []:
+            source_id = id_map.get(str(edge.get("source") or ""))
+            target_id = id_map.get(str(edge.get("target") or ""))
+            if not source_id or not target_id:
+                continue
             self.store.execute(
                 """
                 INSERT INTO literature_edges
@@ -1229,30 +1518,117 @@ class PaperService:
                 """,
                 (
                     paper_id,
-                    seed_node if edge_type != "cites" else node["id"],
-                    node["id"] if edge_type != "cites" else seed_node,
-                    edge_type,
-                    score,
-                    f"MVP1 deterministic {edge_type} score for local graph validation.",
+                    source_id,
+                    target_id,
+                    str(edge.get("edge_type") or "cites"),
+                    float(edge.get("score") or 1.0),
+                    str(edge.get("explanation") or ""),
                 ),
             )
+        self._record_literature_build(
+            paper_id,
+            str(graph.get("status") or "ok"),
+            str(graph.get("status_reason") or ""),
+            str(graph.get("attribution") or S2_ATTRIBUTION),
+        )
         return self.literature_graph(paper_id)
 
-    def literature_graph(self, paper_id: int, view: str = "related") -> dict[str, Any]:
+    def _purge_synthetic_literature(self, paper_id: int) -> None:
         rows = self.store.query_all(
-            "SELECT * FROM literature_nodes WHERE seed_paper_id = ? ORDER BY id", (paper_id,)
+            """
+            SELECT id FROM literature_nodes
+            WHERE seed_paper_id = ? AND external_source = 'mvp1-local'
+            """,
+            (paper_id,),
         )
-        if not rows:
-            return self.build_literature_graph(paper_id)
+        ids = [int(row["id"]) for row in rows]
+        if not ids:
+            return
+        placeholders = ",".join("?" * len(ids))
+        self.store.execute(
+            f"""
+            DELETE FROM literature_edges
+            WHERE seed_paper_id = ?
+              AND (source_node_id IN ({placeholders}) OR target_node_id IN ({placeholders}))
+            """,
+            (paper_id, *ids, *ids),
+        )
+        self.store.execute(
+            "DELETE FROM literature_nodes WHERE seed_paper_id = ? AND external_source = 'mvp1-local'",
+            (paper_id,),
+        )
+
+    def _record_literature_build(
+        self,
+        paper_id: int,
+        status: str,
+        status_reason: str,
+        attribution: str,
+    ) -> None:
+        self.store.execute(
+            """
+            INSERT INTO literature_builds
+                (seed_paper_id, status, status_reason, attribution, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (paper_id, status, status_reason, attribution, utcnow()),
+        )
+
+    def literature_graph(self, paper_id: int, view: str = "related") -> dict[str, Any]:
+        self.get_paper(paper_id)
+        self._purge_synthetic_literature(paper_id)
+        successful = self.store.query_one(
+            """
+            SELECT * FROM literature_builds
+            WHERE seed_paper_id = ? AND status = 'ok'
+            ORDER BY id DESC LIMIT 1
+            """,
+            (paper_id,),
+        )
+        latest = self.store.query_one(
+            "SELECT * FROM literature_builds WHERE seed_paper_id = ? ORDER BY id DESC LIMIT 1",
+            (paper_id,),
+        )
+        if not successful:
+            status = "empty"
+            status_reason = "Literature graph has not been built from Semantic Scholar."
+            attribution = ""
+            if latest and latest["status"] != "ok":
+                status = latest["status"]
+                status_reason = latest["status_reason"]
+            return {
+                "paper_id": paper_id,
+                "view": view,
+                "status": status,
+                "status_reason": status_reason,
+                "attribution": attribution,
+                "nodes": [],
+                "edges": [],
+            }
+        rows = self.store.query_all(
+            """
+            SELECT * FROM literature_nodes
+            WHERE seed_paper_id = ? AND external_source = 'semantic_scholar'
+            ORDER BY id
+            """,
+            (paper_id,),
+        )
         if view in {"prior", "derivative"}:
-            rows = [row for row in rows if row["group_name"] in {view, "related"}]
+            rows = [row for row in rows if row["group_name"] in {view, "seed"}]
         edges = self.store.query_all(
-            "SELECT * FROM literature_edges WHERE seed_paper_id = ? ORDER BY score DESC", (paper_id,)
+            "SELECT * FROM literature_edges WHERE seed_paper_id = ? ORDER BY score DESC",
+            (paper_id,),
         )
         visible = {row["id"] for row in rows}
+        status = latest["status"] if latest else "ok"
+        status_reason = latest["status_reason"] if latest else ""
+        attribution = successful["attribution"] or S2_ATTRIBUTION
         return {
             "paper_id": paper_id,
             "view": view,
+            "status": status,
+            "status_reason": status_reason,
+            "attribution": attribution,
             "nodes": [
                 {
                     "id": row["id"],
@@ -2500,89 +2876,6 @@ def codex_answer(
     }
 
 
-def _prepare_codex_exec(options: dict[str, Any], disabled_message: str) -> dict[str, Any]:
-    if not options.get("enabled"):
-        raise ValueError(disabled_message)
-    cli_path = str(options.get("cli_path") or "codex")
-    resolved_cli = resolve_executable(cli_path)
-    if not resolved_cli:
-        raise ValueError(f"Codex CLI not found: {cli_path}")
-    if not codex_credentials_available(options):
-        raise ValueError("Codex credentials were not detected for this backend process.")
-    timeout_seconds = int(options.get("timeout_seconds") or 180)
-    sandbox = str(options.get("sandbox") or "read-only")
-    if sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
-        sandbox = "read-only"
-    env = os.environ.copy()
-    codex_home = str(options.get("codex_home") or "")
-    if codex_home:
-        env["CODEX_HOME"] = codex_home
-    return {
-        "resolved_cli": resolved_cli,
-        "timeout_seconds": timeout_seconds,
-        "sandbox": sandbox,
-        "model": str(options.get("model") or ""),
-        "env": env,
-    }
-
-
-def _run_codex_exec_prompt(
-    prompt: str,
-    options: dict[str, Any],
-    disabled_message: str,
-    failure_label: str,
-) -> tuple[str, dict[str, Any]]:
-    prepared = _prepare_codex_exec(options, disabled_message)
-    command = [
-        prepared["resolved_cli"],
-        "exec",
-        "--ephemeral",
-        "--sandbox",
-        prepared["sandbox"],
-        "--skip-git-repo-check",
-    ]
-    if prepared["model"]:
-        command.extend(["--model", prepared["model"]])
-    command.append(prompt)
-    explicit_cwd = options.get("cwd")
-    try:
-        if explicit_cwd:
-            result = subprocess.run(
-                command,
-                cwd=str(explicit_cwd),
-                capture_output=True,
-                text=True,
-                timeout=prepared["timeout_seconds"],
-                env=prepared["env"],
-            )
-        else:
-            with tempfile.TemporaryDirectory(prefix="open-alphaxiv-codex-") as codex_cwd:
-                result = subprocess.run(
-                    command,
-                    cwd=codex_cwd,
-                    capture_output=True,
-                    text=True,
-                    timeout=prepared["timeout_seconds"],
-                    env=prepared["env"],
-                )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"{failure_label} timed out after {prepared['timeout_seconds']} seconds.") from exc
-    except OSError as exc:
-        raise RuntimeError(f"{failure_label} could not start: {exc}") from exc
-    if result.returncode != 0:
-        stderr = clean_ws(result.stderr)[-500:]
-        raise RuntimeError(f"{failure_label} failed: {stderr or 'codex exec exited with an error'}")
-    answer = result.stdout.strip()
-    if not answer:
-        raise RuntimeError(f"{failure_label} returned an empty answer.")
-    return answer, {
-        "codex_sandbox": prepared["sandbox"],
-        "codex_cli_path": prepared["resolved_cli"],
-        "codex_stderr_preview": clean_ws(result.stderr)[-500:],
-        "model": prepared["model"] or "codex-local-agent",
-    }
-
-
 def build_codex_paper_prompt(
     paper: dict[str, Any],
     query: str,
@@ -2745,24 +3038,6 @@ def format_selected_image(selected_image: dict[str, Any] | None) -> str:
         f"page={page}, x={x}%, y={y}%, width={width}%, height={height}%."
         " This identifies a visual region selected by the reader; no image pixels are attached in this prompt."
     )
-
-
-def resolve_executable(path: str) -> str:
-    if "/" in path:
-        return path if Path(path).exists() else ""
-    return shutil.which(path) or ""
-
-
-def codex_credentials_available(options: dict[str, Any]) -> bool:
-    if os.environ.get("CODEX_ACCESS_TOKEN") or os.environ.get("CODEX_API_KEY"):
-        return True
-    auth_json_path = os.environ.get("CODEX_AUTH_JSON_PATH")
-    if auth_json_path and Path(auth_json_path).exists():
-        return True
-    codex_home = str(options.get("codex_home") or os.environ.get("CODEX_HOME") or "")
-    if codex_home and (Path(codex_home) / "auth.json").exists():
-        return True
-    return (Path.home() / ".codex" / "auth.json").exists()
 
 
 def redact_provider(row: dict[str, Any]) -> dict[str, Any]:

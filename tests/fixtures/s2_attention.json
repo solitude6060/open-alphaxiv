@@ -1,0 +1,37 @@
+{
+  "seed": {
+    "paperId": "seed-id",
+    "title": "Attention Is All You Need",
+    "year": 2017,
+    "citationCount": 100,
+    "url": "https://www.semanticscholar.org/paper/seed",
+    "externalIds": {"ArXiv": "1706.03762"},
+    "authors": [{"name": "Ashish Vaswani"}]
+  },
+  "references": [
+    {
+      "citedPaper": {
+        "paperId": "prior-id",
+        "title": "Neural Machine Translation by Jointly Learning to Align and Translate",
+        "year": 2014,
+        "citationCount": 10,
+        "url": "https://www.semanticscholar.org/paper/prior",
+        "externalIds": {},
+        "authors": [{"name": "Dzmitry Bahdanau"}]
+      }
+    }
+  ],
+  "citations": [
+    {
+      "citingPaper": {
+        "paperId": "later-id",
+        "title": "BERT: Pre-training of Deep Bidirectional Transformers",
+        "year": 2019,
+        "citationCount": 20,
+        "url": "https://www.semanticscholar.org/paper/later",
+        "externalIds": {"ArXiv": "1810.04805"},
+        "authors": [{"name": "Jacob Devlin"}]
+      }
+    }
+  ]
+}

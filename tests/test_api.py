@@ -61,7 +61,7 @@ def deterministic_arxiv_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda path: "API full paper text about attention layers and evaluation.",
     )
 
-    def page_images(pdf_path: Path, output_dir: Path, max_pages: int = 12) -> list[Path]:
+    def page_images(pdf_path: Path, output_dir: Path, max_pages: int = 80) -> list[Path]:
         output_dir.mkdir(parents=True, exist_ok=True)
         page = output_dir / "page-001.png"
         page.write_bytes(b"png")
@@ -70,7 +70,7 @@ def deterministic_arxiv_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.services.render_pdf_page_images", page_images)
     monkeypatch.setattr(
         "app.services.extract_pdf_text_layers",
-        lambda path, max_pages=12, timeout=30.0: [
+        lambda path, max_pages=80, timeout=30.0: [
             {
                 "page_number": 1,
                 "width": 612.0,
@@ -142,9 +142,9 @@ async def test_chat_messages_accepts_codex_answer_mode_over_http(
             return SimpleNamespace(returncode=0, stdout="HTTP Codex answer [chunk:1]", stderr="")
 
         monkeypatch.setenv("OPEN_ALPHAXIV_CODEX_ENABLED", "true")
-        monkeypatch.setattr("app.services.resolve_executable", lambda path: "/usr/local/bin/codex")
-        monkeypatch.setattr("app.services.codex_credentials_available", lambda options: True)
-        monkeypatch.setattr("app.services.subprocess.run", fake_run)
+        monkeypatch.setattr("app.agents.codex.resolve_executable", lambda path: "/usr/local/bin/codex")
+        monkeypatch.setattr("app.agents.codex.codex_credentials_available", lambda options: True)
+        monkeypatch.setattr("app.agents.codex.subprocess.run", fake_run)
 
         response = await client.post(
             "/api/chat/messages",
@@ -591,9 +591,9 @@ async def test_research_discussion_codex_turn_over_http(
             return SimpleNamespace(returncode=0, stdout="Inspect tokenizer failures first.", stderr="")
 
         monkeypatch.setenv("OPEN_ALPHAXIV_CODEX_ENABLED", "true")
-        monkeypatch.setattr("app.services.resolve_executable", lambda path: "/usr/local/bin/codex")
-        monkeypatch.setattr("app.services.codex_credentials_available", lambda options: True)
-        monkeypatch.setattr("app.services.subprocess.run", fake_run)
+        monkeypatch.setattr("app.agents.codex.resolve_executable", lambda path: "/usr/local/bin/codex")
+        monkeypatch.setattr("app.agents.codex.codex_credentials_available", lambda options: True)
+        monkeypatch.setattr("app.agents.codex.subprocess.run", fake_run)
 
         response = await client.post(
             f"/api/research/discussions/{discussion['id']}/codex",
@@ -727,4 +727,83 @@ async def test_chat_messages_rejects_invalid_answer_mode_over_http(app: FastAPI)
         )
 
     assert response.status_code == 400
-    assert response.json()["detail"] == "answer_mode must be 'mock' or 'codex'"
+    assert "answer_mode must be" in response.json()["detail"]
+    assert "mock" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_agents_status_lists_all_adapters(app: FastAPI) -> None:
+    async with asgi_client(app) as client:
+        response = await client.get("/api/agents/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    for key in ("codex", "claude_cli", "opencode", "openai_compatible"):
+        assert key in payload
+        assert isinstance(payload[key]["available"], bool)
+        assert isinstance(payload[key]["reason"], str)
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_answer_mode_requires_healthy_provider(app: FastAPI) -> None:
+    async with asgi_client(app) as client:
+        paper_response = await client.post("/api/papers", json={"source": "https://arxiv.org/abs/2201.08239"})
+        assert paper_response.status_code == 200
+        paper_id = paper_response.json()["id"]
+        response = await client.post(
+            "/api/chat/messages",
+            json={
+                "paper_id": paper_id,
+                "query": "Summarize the contribution",
+                "answer_mode": "openai_compatible",
+            },
+        )
+
+    assert response.status_code == 400
+    detail = response.json()["detail"].lower()
+    assert "provider" in detail
+
+
+@pytest.mark.asyncio
+async def test_feed_refresh_stores_arxiv_metadata_without_pdf(
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+
+    def fake_list(category: str, max_results: int = 25) -> list[dict[str, object]]:
+        calls.append(category)
+        return [
+            {
+                "arxiv_id": "2201.08239",
+                "title": "Attention Is All You Need",
+                "abstract": "Transformer abstract.",
+                "authors": ["Ashish Vaswani"],
+                "published_at": "2017-06-12T00:00:00Z",
+                "landing_url": "https://arxiv.org/abs/2201.08239",
+                "pdf_url": "https://arxiv.org/pdf/2201.08239",
+            }
+        ]
+
+    monkeypatch.setattr("app.services.list_category", fake_list)
+    async with asgi_client(app) as client:
+        first = await client.post("/api/feed/refresh", json={"category": "cs.LG"})
+        second = await client.post("/api/feed/refresh", json={"category": "cs.LG"})
+        listed = await client.get("/api/feed?category=cs.LG")
+        assert first.status_code == 200
+        assert first.json()["skipped"] is False
+        assert second.status_code == 200
+        assert second.json()["skipped"] is True
+        assert calls == ["cs.LG"]
+        item = listed.json()["items"][0]
+        assert item["landing_url"] == "https://arxiv.org/abs/2201.08239"
+        assert "alphaxiv.org" not in item["landing_url"]
+        assert not list((tmp_path / "data").rglob("*.pdf"))
+        paper_response = await client.post("/api/papers", json={"source": "https://arxiv.org/abs/2201.08239"})
+        graph_response = await client.get(f"/api/papers/{paper_response.json()['id']}/literature-graph")
+
+    assert paper_response.status_code == 200
+    assert graph_response.status_code == 200
+    assert graph_response.json()["nodes"] == []
+    assert graph_response.json()["status"] == "empty"

@@ -394,6 +394,54 @@ a {
   background: #fff;
 }
 
+.feed-strip {
+  padding: 10px 22px 12px;
+  border-bottom: 1px solid #dbe3e6;
+  background: #f7fbfc;
+}
+
+.feed-strip-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.feed-cards {
+  display: flex;
+  gap: 10px;
+  overflow: auto;
+}
+
+.feed-card {
+  min-width: 220px;
+  max-width: 260px;
+  border: 1px solid #d6e0e3;
+  border-radius: 8px;
+  padding: 10px;
+  background: #fff;
+  display: grid;
+  gap: 6px;
+}
+
+.feed-card strong {
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.feed-card-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.feed-empty,
+.graph-attribution,
+.graph-status {
+  font-size: 13px;
+  color: #4b5d64;
+}
+
 .library-strip select {
   min-width: 280px;
   max-width: 520px;

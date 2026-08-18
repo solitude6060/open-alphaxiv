@@ -1,0 +1,20 @@
+# NOTICE
+
+This software is an independent local paper workspace. It is not affiliated
+with, endorsed by, or a product of alphaXiv, arXiv.org, the Allen Institute
+for AI, OpenAI, Anthropic, GitHub, or Cursor.
+
+Descriptive metadata retrieved from arXiv APIs is used under the arXiv API
+Terms of Use (CC0 for descriptive metadata). Cached e-print files, when
+present, are for the operator's personal or research use and remain subject
+to each paper's own license. Link back to the arXiv abstract page for
+downloads: https://info.arxiv.org/help/api/tou.html
+
+Semantic Scholar data, when used, requires attribution to Semantic Scholar
+and compliance with the licenses that accompany that data:
+https://www.semanticscholar.org/product/api/license
+
+Coding-agent binaries (Codex CLI, Claude Code, OpenCode, and others) remain
+subject to their vendors' terms. This project spawns those official binaries
+or talks to them through MCP; it does not grant extra rights to those
+subscriptions.

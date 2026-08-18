@@ -1,5 +1,10 @@
 # Technical Specification
 
+> **Superseded 2026-08-17.** Historical 2026-06 MVP1 draft. Do not implement
+> Next.js, PostgreSQL, pgvector, Redis workers, or Markitdown because this
+> file lists them. Living contract: `docs/CANONICAL.md` and
+> `docs/PRODUCT_CONTRACT.md`.
+
 ## Scope
 
 Build a local-first web application that combines:
@@ -10,8 +15,8 @@ Build a local-first web application that combines:
 - Optional GitHub OAuth, Copilot SDK, GitHub MCP, and Codex connectors.
 - Docker Compose deployment.
 
-This specification covers the intended system contract. It does not implement
-every roadmap item yet, but the implemented MVP follows this contract.
+This specification covered the intended 2026-06 system contract. The
+implemented app follows `docs/PRODUCT_CONTRACT.md`, not this file.
 
 ## Reference Architecture
 

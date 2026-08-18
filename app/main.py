@@ -8,9 +8,12 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from .agents.registry import collect_agent_status
 from .config import get_settings
+from .mcp.server import handle_mcp_request
 from .services import (
     MAX_UPLOAD_PDF_BYTES,
     PaperService,
@@ -34,6 +37,11 @@ class ProviderCreate(BaseModel):
 
 class PaperCreate(BaseModel):
     source: str = Field(..., examples=["https://arxiv.org/abs/2201.08239"])
+
+
+class FeedRefresh(BaseModel):
+    category: str = ""
+    force: bool = False
 
 
 class BookmarkUpdate(BaseModel):
@@ -265,6 +273,22 @@ def create_app() -> FastAPI:
             ),
         }
 
+    @app.get("/api/agents/status")
+    def agents_status() -> dict[str, Any]:
+        return collect_agent_status(
+            settings,
+            providers=service().list_providers(),
+            codex_options=codex_options(),
+        )
+
+    @app.post("/mcp")
+    async def mcp_endpoint(request: Request) -> Response:
+        body = await request.json()
+        payload = await to_thread(handle_mcp_request, body, service())
+        if payload is None:
+            return Response(status_code=204)
+        return JSONResponse(payload)
+
     @app.post("/api/providers")
     def create_provider(payload: ProviderCreate) -> dict[str, Any]:
         return service().create_provider(payload.model_dump())
@@ -314,6 +338,21 @@ def create_app() -> FastAPI:
     @app.get("/api/papers")
     def list_papers(q: str = "") -> list[dict[str, Any]]:
         return service().list_papers(q)
+
+    @app.get("/api/feed")
+    def get_feed(category: str = "") -> dict[str, Any]:
+        try:
+            return service().list_feed(category)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/feed/refresh")
+    def refresh_feed(payload: FeedRefresh | None = None) -> dict[str, Any]:
+        body = payload or FeedRefresh()
+        try:
+            return service().refresh_feed(body.category, body.force)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/papers/{paper_id}")
     def get_paper(paper_id: int) -> dict[str, Any]:
@@ -401,6 +440,8 @@ def create_app() -> FastAPI:
                 system_prompt=payload.system_prompt,
                 answer_mode=payload.answer_mode,
                 codex_options=codex_options(),
+                claude_options=claude_options(),
+                opencode_options=opencode_options(),
             )
         except (ValueError, RuntimeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -717,11 +758,17 @@ def create_app() -> FastAPI:
 
     @app.post("/api/papers/{paper_id}/literature-graph/build")
     def build_graph(paper_id: int) -> dict[str, Any]:
-        return service().build_literature_graph(paper_id)
+        try:
+            return service().build_literature_graph(paper_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/api/papers/{paper_id}/literature-graph")
     def graph(paper_id: int, view: str = "related") -> dict[str, Any]:
-        return service().literature_graph(paper_id, view)
+        try:
+            return service().literature_graph(paper_id, view)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.get("/api/papers/{paper_id}/export.md")
     def export_markdown(paper_id: int) -> Response:
@@ -739,6 +786,25 @@ def codex_options() -> dict[str, Any]:
         "timeout_seconds": settings.codex_timeout_seconds,
         "sandbox": settings.codex_sandbox,
         "codex_home": settings.codex_home,
+    }
+
+
+def claude_options() -> dict[str, Any]:
+    settings = get_settings()
+    return {
+        "enabled": settings.claude_enabled,
+        "cli_path": settings.claude_cli_path,
+        "timeout_seconds": settings.claude_timeout_seconds,
+    }
+
+
+def opencode_options() -> dict[str, Any]:
+    settings = get_settings()
+    return {
+        "enabled": settings.opencode_enabled,
+        "cli_path": settings.opencode_cli_path,
+        "model": settings.opencode_model,
+        "timeout_seconds": settings.opencode_timeout_seconds,
     }
 
 
