@@ -24,12 +24,14 @@ document wins. Do not spend implementation time reconciling them.
 | `docs/ADR-0001-codex-full-paper-context.md` | Still in force for Codex paper prompts |
 | `docs/ADR-0002-legal-local-recreation.md` | Accepted |
 | `docs/ADR-0003-agent-subscription-architecture.md` | Accepted |
-| `status.md` / `tracker.md` / `handover.md` | Project memory |
 
 Stack that exists in the tree (Vite, FastAPI, SQLite, in-process ingest) is
 the stack. Do not add Postgres, Redis, Next.js, or a job queue because a
 superseded spec listed them. Add them only when a living phase names a
 scale trigger.
+
+Operator session files `status.md`, `tracker.md`, and `handover.md` are
+local only. They are gitignored and must not be committed.
 
 ## Records (evidence and reviews; not a spec)
 

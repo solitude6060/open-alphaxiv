@@ -1,92 +1,67 @@
 # Open AlphaXiv
 
-Open AlphaXiv is a local-first research paper workspace for reading arXiv
-papers as selectable PDF pages, asking paper questions, and keeping notes in
-one Docker-deployable app. It is an independent local product, not an official
-alphaXiv service. See [Legal boundary](docs/LEGAL_BOUNDARY.md).
+Local-first paper workspace: discover arXiv work, read the PDF, ask grounded
+questions with your own coding-agent logins or APIs, keep notes, and inspect
+related literature.
+
+This is an independent local product, not an official alphaXiv service. It
+does not call `alphaxiv.org` or `api.alphaxiv.org`. See
+[Legal boundary](docs/LEGAL_BOUNDARY.md) and [NOTICE](NOTICE).
 
 Living documents: [canonical index](docs/CANONICAL.md). Historical 2026-06
 files (`docs/SPEC.md`, `docs/PRD.md`, `docs/MVP_ROADMAP.md`) are archives.
 
-The app is designed for researchers who want a private paper reading surface:
-paste an arXiv URL or upload a local PDF, read the imported PDF in the browser,
-highlight passages or select page regions, and ask questions against the paper
-context.
+## What works today
 
-## What You Can Do
+- Import an arXiv URL or a local PDF. Metadata always keeps an `arxiv.org`
+  landing URL. Cached PDFs are for the operator's personal or research use.
+- Read page images with a selectable text layer. Highlight a passage or a
+  page region and ask about that selection.
+- Ask Paper in `mock`, `codex`, `claude_cli`, `opencode`, or
+  `openai_compatible` mode. Mock needs no model. The other modes stay off
+  until you set the matching enable flag.
+- Refresh a local arXiv category feed (default `cs.LG`). Feed rows are
+  metadata only until you ingest a paper.
+- Build a literature graph from Semantic Scholar. The Similar panel stays
+  empty until a successful build. Failed calls do not invent placeholder
+  papers. Attribute the data to Semantic Scholar.
+- Research projects, notes, experiment runs, discussions, bookmarks, tags,
+  and Markdown export.
+- Localhost MCP so Cursor, Claude Code, or Codex can search and read the
+  library without a second model bill inside this app.
 
-- Import a paper from an arXiv URL or a local PDF file.
-- Read rendered PDF pages in a two-pane workspace with the assistant beside the
-  reader.
-- Highlight selectable PDF text and ask targeted questions about that passage.
-- Select PDF page regions to include visual-region metadata in a question.
-- Ask Codex questions against extracted paper text without exposing retrieval
-  chunks in the reader.
-- Render paper answers as Markdown, including headings, lists, tables, links,
-  quotes, and code blocks.
-- Manage a local Codex system prompt for answer language and output format.
-- Create research projects, track research questions, and keep persistent
-  Markdown notes beside the paper reader.
-- Save highlighted paper passages and Ask Paper answers into research notes
-  with evidence links.
-- Track experiment runs with datasets, commands, code references, metrics,
-  summaries, and artifact references.
-- Record project-level research discussions and freeze grounding snapshots for
-  later review.
-- Ask Codex inside project-level research discussions using the current project
-  state, notes, experiment runs, discussion history, and a frozen grounding
-  snapshot.
-- Search local research projects, notes, experiment runs, discussions, and
-  snapshots from a compact research status dashboard.
-- Export a research project as readable Markdown with paper and chat citations.
-- Use the built-in mock answer mode for local development without an external
-  model.
-- Use local Codex through `codex exec` for paper Q&A when the host machine is
-  already logged in to the Codex CLI.
-- Bookmark, tag, and export paper notes as Markdown.
-- Explore related, prior, and derivative literature from Semantic Scholar
-  (empty until you build the graph; no generated placeholder papers).
-- Refresh a local arXiv category feed (metadata only until you ingest a paper).
+## What this is not
 
-## Run Locally
+- A public clone of alphaxiv.org (no comments network, events, or Pro
+  billing).
+- A public PDF host. Do not expose the API on the internet and serve
+  cached e-prints to other people.
+- An in-app Cursor or Claude Pro OAuth wrapper. Cursor joins through MCP.
+  Claude subscription answers use the official `claude` binary, not
+  `--bare`.
 
-Run the full Docker stack:
+The private folder name may keep `alphaxiv`. Choose a different public
+name before marketing. The prefix `open-` does not make that mark safe.
 
-```bash
-docker compose up --build
-```
+## Requirements
 
-The API uses SQLite on the `app-data` volume. Compose does not start
-Postgres or Redis.
-
-Open the app:
-
-```text
-http://127.0.0.1:3100
-```
-
-Default local endpoints:
-
-- Web: `http://127.0.0.1:3100`
-- API: `http://127.0.0.1:8000`
-- API docs: `http://127.0.0.1:8000/docs`
-
-Use a different web port when 3100 is already occupied:
-
-```bash
-WEB_PORT=3200 docker compose up -d web
-```
-
-Docker Compose forwards Codex flags only. Claude Code and OpenCode paper
-chat need the host API below, because those CLIs and logins live on the
-machine, not in the image.
+- Python 3.10+ with `pip install -r requirements.txt`
+- Node.js 20+ for `web/`
+- Poppler (`pdftotext`, `pdftoppm`) for full text and page images. Without
+  it, ingest falls back to metadata and the abstract.
+- Optional: host `codex`, `claude`, and `opencode` on `PATH` for in-app
+  answers. Those binaries must already be logged in on this machine.
 
 ## Run on the host
 
-Use this path for Claude Code or OpenCode Ask Paper:
+This is the path that can use Claude Code and OpenCode. Copy
+`.env.example` to `.env` and edit flags there, or export them in the
+shell.
 
 ```bash
-export PYTHONPATH=.:.deps
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 export OPEN_ALPHAXIV_CLAUDE_ENABLED=true
 export OPEN_ALPHAXIV_OPENCODE_ENABLED=true
 export OPEN_ALPHAXIV_CORS_ORIGIN=http://localhost:3000
@@ -95,133 +70,92 @@ python3 -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 
 ```bash
 cd web
+npm install
 npm run dev
 ```
 
-Open `http://127.0.0.1:3000`. Copy `.env.example` to `.env` to set
-`SEMANTIC_SCHOLAR_API_KEY`. Without a key, Similar-panel builds stay empty
-after Semantic Scholar HTTP 429. Enable Codex with
-`OPEN_ALPHAXIV_CODEX_ENABLED=true` only when the host Codex CLI is inside
-its usage window.
+Open `http://127.0.0.1:3000`. API docs: `http://127.0.0.1:8000/docs`.
 
-## Paper Import
-
-Paste an arXiv paper URL into the import field, for example:
-
-```text
-https://arxiv.org/abs/1706.03762
-```
-
-The API stores the paper metadata, downloads the PDF when available, extracts
-text with Poppler, renders page images, creates a transparent page text layer
-for highlighting, creates Markdown content, builds local retrieval data for
-mock mode and graph construction, and makes the paper available in the reader.
-
-You can also choose a local PDF from the import bar. Local uploads use the same
-PDF processing path as arXiv imports: the backend stores the PDF bytes locally,
-extracts text, renders page images, creates selectable page text layers,
-generates Markdown, and indexes the paper for Ask Paper.
-
-The Docker images include `poppler-utils` for PDF text and page-image
-extraction. When running the API directly on the host, install Poppler so
-`pdftotext` and `pdftoppm` are available on `PATH`; otherwise Open AlphaXiv
-falls back to metadata and abstract text.
-
-## Local Codex Paper Q&A
-
-Open AlphaXiv can answer paper questions with a local Codex agent. The backend
-runs `codex exec` in read-only sandbox mode and sends paper metadata, selected
-passage text, selected image-region metadata, and extracted paper text as prompt
-context. The prompt uses a conservative size limit and adds a truncation marker
-when a paper is too long for the local prompt budget.
-
-The web UI also lets you set a local Codex system prompt for paper chat. This is
-stored in browser local storage and sent only when Codex answer mode is used,
-so you can control answer language, Markdown structure, JSON-only output, or
-other response formatting instructions without changing backend environment
-variables.
-
-The same local Codex boundary is available from Research Discussions. A Codex
-discussion turn stores the user question, freezes a grounding snapshot of the
-project, sends the project state, notes, experiment runs, and recent discussion
-history to `codex exec`, then stores the Markdown answer as an assistant
-message. This gives project-level research notes and experiment data a durable
-conversational surface without exposing raw retrieval chunks in the reader.
-
-Codex login is handled by the host CLI, not by the web UI:
+If this machine already has dependencies under `.deps` (gitignored):
 
 ```bash
-codex login
-OPEN_ALPHAXIV_CODEX_ENABLED=true python -m uvicorn app.main:app --reload
+export PYTHONPATH=.:.deps
+python3 -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-For Docker, mount the host Codex CLI and credentials into the API container:
+If port 3000 is taken:
+
+```bash
+cd web
+npm run dev -- --host 127.0.0.1 --port 3310
+```
+
+Set `OPEN_ALPHAXIV_CORS_ORIGIN=http://localhost:3310` on the API.
+
+## Run with Docker
+
+```bash
+docker compose up --build
+```
+
+- Web: `http://127.0.0.1:3100`
+- API: `http://127.0.0.1:8000`
+
+Compose starts `api`, `web`, and a stub `worker`. It uses SQLite on the
+`app-data` volume. It does not start Postgres or Redis.
+
+```bash
+WEB_PORT=3200 docker compose up -d web
+```
+
+The image has Poppler. It does not include your Claude or OpenCode logins.
+Compose forwards Codex flags only. For Claude or OpenCode Ask Paper, run
+the API on the host.
+
+To mount a host Codex CLI into the API container:
 
 ```bash
 bash scripts/check-codex-docker.sh
 ```
 
-The script prints the exact environment variables and compose command for the
-current machine. The generated command uses `docker-compose.codex.yml`, which
-mounts:
+Treat a mounted `auth.json` as a password. Prefer a dedicated
+`CODEX_HOME` if you do not want the container to write to `~/.codex`.
 
-- the host Node prefix containing `bin/codex` at `/opt/codex-node`
-- the host Codex credential directory at `/codex-home`
-- `CODEX_HOME=/codex-home`
-- `OPEN_ALPHAXIV_CODEX_ENABLED=true`
+## Ask Paper
 
-If the host Codex install uses file-based authentication, `auth.json` is mounted
-into the container. Treat that file as a password. The web UI displays Codex
-availability and setup commands, but it does not start or proxy `codex login`.
-The Codex home mount is writable because the Codex CLI may update local session
-state under `CODEX_HOME`; use a dedicated Codex home directory for this project
-if you do not want the container to write to your primary `~/.codex` directory.
+Pick the mode in the reader. Modes other than mock stay disabled until the
+backend probe reports them available.
 
-Relevant Codex settings:
+| Mode | How it runs | Enable |
+| --- | --- | --- |
+| `mock` | Extractive local answer | always on |
+| `claude_cli` | `claude -p` with the prompt on stdin, no `--bare` | `OPEN_ALPHAXIV_CLAUDE_ENABLED=true` |
+| `opencode` | `opencode run --format default --dir <cwd>` | `OPEN_ALPHAXIV_OPENCODE_ENABLED=true` |
+| `codex` | `codex exec --ephemeral --sandbox read-only` | `OPEN_ALPHAXIV_CODEX_ENABLED=true` |
+| `openai_compatible` | `POST {base_url}/chat/completions` | create a provider and pass healthcheck |
 
-- `OPEN_ALPHAXIV_CODEX_ENABLED=true`
-- `OPEN_ALPHAXIV_CODEX_CLI_PATH=codex`
-- `OPEN_ALPHAXIV_CODEX_MODEL=` optional model override
-- `OPEN_ALPHAXIV_CODEX_TIMEOUT_SECONDS=180`
-- `OPEN_ALPHAXIV_CODEX_SANDBOX=read-only`
-- `CODEX_HOME`, `CODEX_ACCESS_TOKEN`, `CODEX_API_KEY`, or
-  `CODEX_AUTH_JSON_PATH` when required by the backend runtime
-- `OPEN_ALPHAXIV_HOST_NODE_PREFIX` and `OPEN_ALPHAXIV_HOST_CODEX_HOME` when
-  using `docker-compose.codex.yml`
+Logins stay in the official CLIs. This app does not copy OAuth tokens out
+of `~/.claude`, `~/.codex`, or the browser.
 
-## Development Checks
+The optional system prompt in the UI is stored in browser local storage
+and sent only with non-mock modes.
 
-Run backend tests:
+Research Discussions can also call Codex with a frozen project snapshot.
 
-```bash
-env PYTHONPATH=.:.deps python3 -m pytest
-```
+## Feed and literature graph
 
-Build the web app:
+Refresh the library feed to pull the latest metadata for
+`OPEN_ALPHAXIV_ARXIV_CATEGORIES` (default `cs.LG`). The client waits at
+least `OPEN_ALPHAXIV_FEED_MIN_INTERVAL_SECONDS` (default 900) between
+refreshes unless you force one. Opening a card is what fetches the PDF.
 
-```bash
-cd web
-npm install
-npm run build
-```
-
-Run the web app against a non-default local API port:
-
-```bash
-cd web
-VITE_API_URL=http://127.0.0.1:18000 npm run dev -- --host 127.0.0.1 --port 3310
-```
-
-Check the Codex Docker mount setup:
-
-```bash
-bash scripts/check-codex-docker.sh
-```
+The Similar panel does not auto-build on ingest. Click build after you
+have a `SEMANTIC_SCHOLAR_API_KEY` if unauthenticated requests return
+HTTP 429. Graph v1 uses direct citations and cited-by edges only.
 
 ## MCP (localhost)
 
-Bind the API to loopback. Cursor, Claude Code, and Codex can call the local
-library without a second model bill inside this app.
+Bind the API to loopback. Do not publish `/mcp` on the public internet.
 
 Cursor `mcp.json`:
 
@@ -235,29 +169,65 @@ Cursor `mcp.json`:
 }
 ```
 
-Claude Code:
-
 ```bash
 claude mcp add --transport http open-alphaxiv http://127.0.0.1:8000/mcp
-```
-
-Codex CLI:
-
-```bash
 codex mcp add open-alphaxiv --url http://127.0.0.1:8000/mcp
-```
-
-Stdio launcher for clients that want a child process:
-
-```bash
 python -m app.mcp
 ```
 
 Tools: `search_arxiv`, `ingest_paper`, `list_library`, `get_paper_text`,
 `query_paper_pages`, `save_note`, `list_notes`. `search_arxiv` only calls
-`export.arxiv.org`.
+`export.arxiv.org` and shares the 3-second arXiv limiter.
 
-## Project Docs
+## Environment
 
-Index: [canonical documents](docs/CANONICAL.md). That file lists living
-contracts, evidence records, and historical 2026-06 archives.
+Copy `.env.example` to `.env`. `.env` is gitignored.
+
+| Variable | Role |
+| --- | --- |
+| `OPEN_ALPHAXIV_STORAGE_DIR` | Paper files and SQLite parent (default `./data`) |
+| `OPEN_ALPHAXIV_DATABASE_PATH` | SQLite path |
+| `OPEN_ALPHAXIV_CORS_ORIGIN` | Browser origin allowed to call the API |
+| `OPEN_ALPHAXIV_CLAUDE_ENABLED` | Spawn `claude -p` |
+| `OPEN_ALPHAXIV_OPENCODE_ENABLED` | Spawn `opencode run` |
+| `OPEN_ALPHAXIV_CODEX_ENABLED` | Spawn `codex exec` |
+| `OPEN_ALPHAXIV_ARXIV_CATEGORIES` | Feed categories, comma-separated |
+| `SEMANTIC_SCHOLAR_API_KEY` | Reliable literature-graph builds |
+| `OPENAI_COMPATIBLE_BASE_URL` | Optional HTTP provider. Non-localhost hosts must be `https`. |
+
+Do not put API keys in the frontend bundle. `CODEX_ACCESS_TOKEN` and
+`CODEX_API_KEY` are optional overrides; prefer the host CLI login.
+
+## Tests
+
+```bash
+env PYTHONPATH=.:.deps python3 -m pytest
+# or, with a venv:
+python3 -m pytest
+```
+
+```bash
+cd web
+npm run build
+```
+
+```bash
+docker compose config -q
+```
+
+Live checks (network, operator accounts):
+
+```bash
+env PYTHONPATH=.:.deps python3 scripts/live_phase2_check.py
+env PYTHONPATH=.:.deps OPEN_ALPHAXIV_CLAUDE_ENABLED=true OPEN_ALPHAXIV_OPENCODE_ENABLED=true python3 scripts/live_phase1_qa.py
+```
+
+## Docs and license
+
+- [Canonical index](docs/CANONICAL.md)
+- [Product contract](docs/PRODUCT_CONTRACT.md)
+- [Legal boundary](docs/LEGAL_BOUNDARY.md)
+- [Agent architecture](docs/AGENT_ARCHITECTURE.md)
+- [Recreation plan](docs/ALPHAXIV_RECREATION_PLAN.md)
+
+MIT. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

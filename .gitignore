@@ -1,4 +1,7 @@
 .env
+status.md
+tracker.md
+handover.md
 data/
 *.db
 .deps/
